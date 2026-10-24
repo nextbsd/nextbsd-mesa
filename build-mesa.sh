@@ -509,12 +509,13 @@ build_mesa() {
     not_needed "$gallium" 'libLLVM|libclang|libwayland|libudev|libzstd'
     not_needed "$x/lib/libgbm.so.1" 'libLLVM|libgallium|libwayland'
     lib_needs libgbm.so.1 libdrm.so.2
-    lib_needs libGLX_mesa.so.0 libX11.so.6 libxcb-dri3.so.0 libxshmfence.so.1
+    lib_needs libGLX_mesa.so.0 libX11.so.6 libxcb-dri3.so.0
     case "$T" in
         amd64) needed_check "$gallium" libdrm_amdgpu.so.1 ;;
     esac
     needed_check "$gallium" libexpat.so.1
-    note "libgallium-$VERSION.so: $(du -k "$gallium" | cut -f1) KiB"
+    note "libgallium-$VERSION.so: $(du -k "$gallium" | cut -f1) KiB, NEEDED:" \
+        "$("$CROSS_BINDIR/llvm-readelf" -d "$gallium" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p' | tr '\n' ' ')"
     pc_check dri "$VERSION"
     [ "$(PKG_CONFIG_LIBDIR="$SYSROOT$X_PREFIX/lib/pkgconfig" pkgconf --variable=dridriverdir dri)" = "$X_PREFIX/lib/dri" ] \
         || fail "dri.pc dridriverdir is not $X_PREFIX/lib/dri"

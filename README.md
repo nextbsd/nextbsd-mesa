@@ -101,6 +101,13 @@ path; no absolute symlinks. Then it checks sonames, `DT_NEEDED` entries
 | `mesa` | 26.2.5 | `libGLX_mesa.so.0` (+ `libGLX_indirect.so.0` link), `libEGL_mesa.so.0` + `share/glvnd/egl_vendor.d/50_mesa.json`, `libgbm.so.1` + `lib/gbm/dri_gbm.so`, `libgallium-26.2.5.so`, `lib/dri/*_dri.so` (links to `libdril_dri.so`), `share/drirc.d` | nextbsd/nextbsd-mesa#1 |
 | `glu` | 9.0.3 | `libGLU.so.1`, `GL/glu.h` (E24: Gershwin's ItemFlow and Player, libs-quartzcore) | nextbsd/nextbsd-mesa#1 |
 
+Installed size (first CI build, iris and crocus not built):
+
+| Arch | `/usr/X11` from this repo | of which `libgallium-26.2.5.so` (LLVM inside) | artifact (`.tar.gz`) |
+|---|---|---|---|
+| amd64 | 84 MiB | 77 MiB | 26 MiB |
+| arm64 | 77 MiB | 68 MiB | 23 MiB |
+
 Licences are per component; see `NOTICE.md`. The top-level `LICENSE` (BSD-2)
 covers only this repo's harness. freeglut is not built: nothing calls GLUT.
 
