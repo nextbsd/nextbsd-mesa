@@ -1,0 +1,47 @@
+Description: v3d: don't advertise texture_barrier
+ On a tiler v3d_texture_barrier() is a full flush. glamor takes the barrier
+ path for every window-to-window CopyArea when NV_texture_barrier is present;
+ on a Pi 500+ that cost 11.3 GPU jobs per copy (1690 copies/s against 13800/s
+ for the temp-pixmap path). Every caller has a fallback.
+Origin: nextbsd-ports 6201470e03d4, graphics/mesa-dri/files/patch-src_gallium_drivers_v3d_v3d__screen.c
+Forwarded: no
+---
+--- a/src/gallium/drivers/v3d/v3d_screen.c
++++ b/src/gallium/drivers/v3d/v3d_screen.c
+@@ -265,7 +265,35 @@
+         caps->conditional_render = true;
+         caps->conditional_render_inverted = true;
+         caps->cube_map_array = true;
+-        caps->texture_barrier = true;
++        /*
++         * Deliberately not advertised. v3d_texture_barrier() can only be a
++         * full v3d_flush(): V3D is a tile-based renderer, so the tile buffer
++         * has to be resolved to memory before anything may sample it. That
++         * makes glTextureBarrier() a pipeline flush rather than the nearly
++         * free operation callers assume.
++         *
++         * Consumers pick their algorithm from this capability, and they pick
++         * wrong here. glamor_copy_needs_temp() takes the barrier path for
++         * every window-to-window CopyArea when NV_texture_barrier is present,
++         * and the temp-pixmap path when it is not:
++         *
++         *      if (!glamor_priv->has_nv_texture_barrier)
++         *              return TRUE;
++         *      ...
++         *      glTextureBarrierNV();
++         *
++         * On a Pi 500+ that cost 11.3 GPU jobs per copy against 0.008 for a
++         * pixmap-to-window copy, because each barrier ends the batch:
++         *
++         *      copy 500x500 window->window   1690/sec
++         *      copy 500x500 pixmap->window  13800/sec
++         *
++         * which is ~15 window repaints/sec while dragging. The temp path is
++         * two batchable draws and no flush, so withholding the capability is
++         * faster than offering it. Nothing is lost correctness-wise -- the
++         * extension is an optimisation, and every caller has a fallback.
++         */
++        caps->texture_barrier = false;
+         caps->polygon_offset_clamp = true;
+         caps->texture_query_lod = true;
+ 

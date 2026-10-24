@@ -1,0 +1,18 @@
+Description: renderdoc_app.h: define RENDERDOC_CC on FreeBSD and DragonFly
+ The header only knows Windows, Linux and Apple, and errors out
+ ("Unknown platform") elsewhere. NextBSD's compiler defines __FreeBSD__.
+Origin: nextbsd-ports d3479089952d, graphics/mesa-dri/files/patch-include_renderdoc__app.h
+ (inherited unchanged from the FreeBSD port graphics/mesa-dri)
+Forwarded: no
+---
+--- a/include/renderdoc_app.h
++++ b/include/renderdoc_app.h
+@@ -35,7 +35,7 @@
+ 
+ #if defined(WIN32) || defined(__WIN32__) || defined(_WIN32) || defined(_MSC_VER)
+ #define RENDERDOC_CC __cdecl
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__FreeBSD__) || defined(__DragonFly__)
+ #define RENDERDOC_CC
+ #elif defined(__APPLE__)
+ #define RENDERDOC_CC

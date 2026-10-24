@@ -1,0 +1,155 @@
+name: Build NextBSD Mesa (libglvnd, Mesa, libGLU)
+
+# Cross-builds libglvnd, Mesa and libGLU into /usr/X11 for amd64 and arm64 on
+# the x86_64 runner, inside the per-arch nextbsd-kernel-toolchain container,
+# from the pinned tarballs in sources.lock. The sysroot is compat's
+# `continuous` base with nextbsd-xlibs' `continuous` artifact (libdrm, the X
+# client libraries, expat) on top; LLVM is nextbsd-toolchain's static
+# llvm-static-19.1.7 release. Same shape as nextbsd-xlibs (wiki:
+# Source-Repo-Conventions). Publishes nextbsd-mesa-<arch>.tar.gz to this
+# repo's `continuous` release on pushes to main and on manual runs from main;
+# pull requests build only.
+#
+# Nothing is dispatched from here and nothing dispatches here: nextbsd-xlibre
+# (which builds against this artifact) and nextbsd-pkg are run by hand, in
+# order (E23 plan; the rebuild-chain policy: a merge never rebuilds downstream
+# repos).
+
+on:
+  push:
+    branches: [main]
+    paths: ['build-mesa.sh', 'sources.lock', 'patches/**', 'cross/**', '.github/workflows/build.yml']
+  pull_request:
+    paths: ['build-mesa.sh', 'sources.lock', 'patches/**', 'cross/**', '.github/workflows/build.yml']
+  workflow_dispatch:
+    inputs:
+      fbsd_sha:
+        description: 'Pinned FreeBSD SHA for the toolchain image tag (blank = latest)'
+        required: false
+        default: ''
+
+env:
+  # nextbsd-toolchain's static LLVM (E23 D2/D3): the pinned 19.1.7.
+  LLVM_STATIC_TAG: llvm-static-19.1.7
+
+jobs:
+  build:
+    name: mesa (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, target_arch: amd64 }
+          - { arch: arm64, target_arch: aarch64 }
+    container:
+      # Per-arch toolchain image: the pinned llvmorg-19.1.7 clang, lld and LLVM
+      # binutils at $CROSS_BINDIR (set by the image), plus meson 1.12.1, ninja,
+      # pkgconf, bison, flex and python3 with mako and yaml
+      # (nextbsd-toolchain#13). Once rebuilt with nextbsd-toolchain#11 it also
+      # carries /opt/mesa-clc, and build-mesa.sh then adds iris and crocus.
+      image: ghcr.io/nextbsd/nextbsd-kernel-toolchain:${{ matrix.arch }}-${{ inputs.fbsd_sha && format('fbsd-{0}', inputs.fbsd_sha) || 'latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Mesa's meson needs Python's `packaging` (Ubuntu 24.04's Python 3.12
+      # has no distutils). nextbsd-toolchain#11 adds it to the image; until
+      # that image is published, install it here. Remove this step then.
+      - name: Python packaging for Mesa's meson (until the image has it)
+        run: |
+          if ! python3 -c 'import packaging.version' 2>/dev/null; then
+            apt-get update
+            apt-get install -y --no-install-recommends python3-packaging
+          fi
+          python3 -c 'import packaging, mako, yaml; print("packaging", packaging.__version__, "mako", mako.__version__)'
+
+      # Stage the cross sysroot, in the order the repos build:
+      #   1. compat's base: libc, libc++, libz, libelf, headers and
+      #      /usr/libdata/pkgconfig;
+      #   2. nextbsd-xlibs: libdrm, the X client libraries, libxshmfence and
+      #      expat in /usr/X11.
+      # Public reads, so the built-in token is enough and fork PRs work.
+      # build-mesa.sh installs each component into this sysroot as it goes.
+      - name: Stage sysroot from compat and xlibs continuous
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/sysroot"
+          gh release download continuous \
+            --repo nextbsd/nextbsd-freebsd-compat \
+            --pattern "nextbsd-base-${{ matrix.arch }}.tar.gz" \
+            --output /tmp/base.tar.gz --clobber
+          gh release download continuous \
+            --repo nextbsd/nextbsd-xlibs \
+            --pattern "nextbsd-xlibs-${{ matrix.arch }}.tar.gz" \
+            --output /tmp/xlibs.tar.gz --clobber
+          for t in base xlibs; do
+            tar -C "$GITHUB_WORKSPACE/sysroot" -xzf "/tmp/$t.tar.gz"
+          done
+
+      # The static LLVM for llvmpipe, linked into libgallium and never shipped
+      # on its own. Checked against the release's .sha256, then unpacked to
+      # /opt/llvm-19-nextbsd-<arch> (bin/llvm-config answers for the target).
+      - name: Fetch static LLVM ${{ env.LLVM_STATIC_TAG }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          f="nextbsd-${LLVM_STATIC_TAG}-${{ matrix.arch }}.tar.xz"
+          cd /tmp
+          gh release download "$LLVM_STATIC_TAG" \
+            --repo nextbsd/nextbsd-toolchain \
+            --pattern "$f" --pattern "$f.sha256" --clobber
+          sha256sum -c "$f.sha256"
+          tar -C /opt -xJf "$f"
+          cat "/opt/llvm-19-nextbsd-${{ matrix.arch }}/BUILD-INFO"
+
+      - name: Build Mesa into /stage
+        env:
+          T: ${{ matrix.arch }}
+          TA: ${{ matrix.target_arch }}
+          SYSROOT: ${{ github.workspace }}/sysroot
+          LLVM_STATIC: /opt/llvm-19-nextbsd-${{ matrix.arch }}
+          DESTDIR: /stage
+        run: ./build-mesa.sh
+
+      # Raw tar of /stage rooted at /: everything under /usr/X11, including
+      # the headers, .pc files and .so links that nextbsd-xlibre stages into
+      # its sysroot. Splitting runtime from development files is
+      # nextbsd-pkg's job (E23 D13).
+      - name: Pack mesa artifact
+        run: |
+          tar -C /stage -czf "/tmp/nextbsd-mesa-${{ matrix.arch }}.tar.gz" .
+          tar -tzvf "/tmp/nextbsd-mesa-${{ matrix.arch }}.tar.gz" | grep -v '/$' || true
+          ls -l "/tmp/nextbsd-mesa-${{ matrix.arch }}.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nextbsd-mesa-${{ matrix.arch }}
+          path: /tmp/nextbsd-mesa-${{ matrix.arch }}.tar.gz
+
+  publish:
+    needs: build
+    # Pushes to main and manual runs from main; never pull requests.
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Gather artifacts
+        run: |
+          mkdir -p out
+          find artifacts -name 'nextbsd-mesa-*.tar.gz' -exec cp {} out/ \;
+          ls -la out/
+      - name: Publish to continuous release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: continuous
+          name: Continuous Mesa build
+          prerelease: true
+          fail_on_unmatched_files: true
+          files: out/*.tar.gz
+      # That is where this stops: no dispatch to nextbsd-xlibre or
+      # nextbsd-pkg. They are run by hand once this build is known good.

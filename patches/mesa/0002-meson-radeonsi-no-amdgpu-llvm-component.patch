@@ -1,0 +1,27 @@
+Description: radeonsi: only ask llvm-config for amdgpu when AMD uses LLVM
+ meson.build adds LLVM's amdgpu component whenever radeonsi or radv is built,
+ even with -Damd-use-llvm=false, where ACO compiles every shader, src/amd/llvm
+ is not built and AMD_LLVM_AVAILABLE is 0. NextBSD's static LLVM is built for
+ the host target only (nextbsd-toolchain llvm-static, E23 D3), so the
+ dependency lookup fails although nothing would link the AMDGPU backend.
+ Ask for amdgpu only when amd_with_llvm; bitreader and ipo stay as they were.
+ E23 plan decision D8.
+Origin: NextBSD
+Forwarded: no
+---
+--- a/meson.build
++++ b/meson.build
+@@ -1962,7 +1962,12 @@
+ llvm_modules = ['bitwriter', 'engine', 'mcdisassembler', 'core', 'executionengine', 'scalaropts', 'transformutils', 'instcombine']
+ llvm_optional_modules = ['coroutines']
+ if with_amd_vk or with_gallium_radeonsi
+-  llvm_modules += ['amdgpu', 'bitreader', 'ipo']
++  llvm_modules += ['bitreader', 'ipo']
++  # Only the LLVM compiler path (src/amd/llvm) needs LLVM's AMDGPU backend.
++  # With amd-use-llvm=false ACO compiles every shader and nothing links it.
++  if amd_with_llvm
++    llvm_modules += ['amdgpu']
++  endif
+ endif
+ if with_clc
+   llvm_modules += ['coverage', 'target', 'linker', 'irreader', 'option', 'libdriver', 'lto']

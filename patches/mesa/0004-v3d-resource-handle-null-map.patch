@@ -1,0 +1,20 @@
+Description: v3d: handle a failed BO map in v3d_texture_subdata()
+ Companion to the v3d_bufmgr.c change: v3d_bo_map() can now return NULL, so
+ texture_subdata logs and returns instead of writing through it.
+Origin: nextbsd-ports 85c0450876cc, graphics/mesa-dri/files/patch-src_gallium_drivers_v3d_v3d__resource.c
+Forwarded: no
+---
+--- a/src/gallium/drivers/v3d/v3d_resource.c
++++ b/src/gallium/drivers/v3d/v3d_resource.c
+@@ -400,6 +400,11 @@
+         else
+                 buf = v3d_bo_map(rsc->bo);
+ 
++        if (!buf) {
++                mesa_loge("Failed to map bo for texture_subdata");
++                return;
++        }
++
+         for (int i = 0; i < box->depth; i++) {
+                 v3d_store_tiled_image(buf +
+                                       v3d_layer_offset(&rsc->base,
