@@ -1,0 +1,35 @@
+Description: gbm (dri backend): take the xcb include flags when the X11 platform is built
+ src/gbm/backends/dri/gbm_dri.c includes src/loader/loader_dri_helper.h,
+ which includes loader_dri_helper_screen.h, and that includes <xcb/xcb.h>,
+ <xcb/dri3.h> and <xcb/present.h> under HAVE_X11_PLATFORM. dri_gbm's meson
+ target does not list any xcb dependency, so it only builds when the xcb
+ headers happen to be on another dependency's include path (in /usr/include
+ on Linux, /usr/local/include on FreeBSD, or, before E25, /usr/X11/include
+ through nextbsd-xlibs' libdrm.pc). With libdrm from
+ nextbsd-displayserver-support in /usr and xcb in /usr/X11, the compile
+ fails with "'xcb/xcb.h' file not found". Add the xcb, xcb-dri3 and
+ xcb-present compile flags only (partial dependencies), so dri_gbm.so still
+ links no libxcb. Unchanged in Mesa main as of 2026-10.
+Origin: NextBSD
+Forwarded: no
+---
+--- a/src/gbm/backends/dri/meson.build
++++ b/src/gbm/backends/dri/meson.build
+@@ -4,6 +4,17 @@
+ # TODO: fix includes to delete this
+ incs_gbm_dri = [inc_mesa]
+ 
++# gbm_dri.c includes loader_dri_helper.h, whose loader_dri_helper_screen.h
++# includes <xcb/xcb.h>, <xcb/dri3.h> and <xcb/present.h> when the X11 platform
++# is built. Only the headers are needed; dri_gbm.so must not link libxcb.
++if with_platform_x11
++  deps_gbm_dri += [
++    dep_xcb.partial_dependency(compile_args : true, includes : true),
++    dep_xcb_dri3.partial_dependency(compile_args : true, includes : true),
++    dep_xcb_present.partial_dependency(compile_args : true, includes : true),
++  ]
++endif
++
+ if with_platform_wayland
+   deps_gbm_dri += dep_wayland_server
+   if with_wayland_bind_display

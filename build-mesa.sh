@@ -610,7 +610,7 @@ egl_platform_checks() {
     done
     lib_needs libEGL_mesa.so.0 libgbm.so.1 libdrm.so.2
     not_needed "$x/lib/libEGL.so.1" 'libX11|libxcb'
-    for f in libEGL.so.1 libEGL_mesa.so.0; do
+    for f in libEGL.so.1 libEGL_mesa.so.0 gbm/dri_gbm.so; do
         note "$f NEEDED: $("$CROSS_BINDIR/llvm-readelf" -d "$x/lib/$f" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p' | tr '\n' ' ')"
     done
 }

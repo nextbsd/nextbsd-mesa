@@ -210,6 +210,7 @@ applied already and are compiled once the drivers are on.
 | `0006-intel-userptr-unsynchronized-fallback` | nextbsd-ports (FreeBSD) | drm-kmod's i915 has no MMU-notifier userptr |
 | `0007-intel-xe-clock-boottime-alias` | nextbsd-ports (FreeBSD) | `CLOCK_BOOTTIME == CLOCK_MONOTONIC` |
 | `0008-renderdoc-app-cc-freebsd` | nextbsd-ports (FreeBSD) | build fix |
+| `0009-gbm-dri-xcb-headers` | NextBSD | build fix: `dri_gbm.so` includes the loader's xcb headers when the X11 platform is built, but its meson target lists no xcb dependency; it built only while libdrm's `-I/usr/X11/include` happened to cover them. Adds the xcb, xcb-dri3 and xcb-present compile flags only, so it links no libxcb (E25) |
 
 Dropped: the POWER8 meson hunk and the llvmpipe altivec patch (PowerPC), the
 panfrost clock patch (panfrost isn't built), the Wayland WSI patch (no
