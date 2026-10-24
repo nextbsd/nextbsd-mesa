@@ -274,6 +274,13 @@ stage() {
     done
     bad=$(find "$x" -type l -lname '/*')
     [ -z "$bad" ] || fail "$name installed absolute symlinks: $bad"
+    # No RPATH/RUNPATH naming a build-host path (meson's build rpaths must
+    # have been stripped at install).
+    for f in $(find "$x" -type f -name '*.so*'); do
+        if "$CROSS_BINDIR/llvm-readelf" -d "$f" 2>/dev/null | grep -E '\((RPATH|RUNPATH)\)'; then
+            fail "$(basename "$f") carries an RPATH/RUNPATH"
+        fi
+    done
     find "$x" -type d -empty -delete
     clash=$(cd "$COMP_ROOT" && find . ! -type d | sed 's#^\./##' | LC_ALL=C sort | LC_ALL=C comm -12 - "$BASE_LIST")
     [ -z "$clash" ] || fail "$name would replace files of the NextBSD base or nextbsd-xlibs: $clash"
@@ -447,7 +454,13 @@ build_mesa() {
         clc=(--native-file "$CLC_NATIVE" -Dmesa-clc=system)
     fi
     note "gallium drivers: $drivers"
-    meson_build "${clc[@]}" \
+    # -Db_lundef=false: meson's default --no-undefined can't hold for
+    # libgallium with LLVM linked in statically. LLVMSupport's Program.cpp
+    # uses `environ`, which NextBSD (like FreeBSD) defines in crt1.o, i.e. in
+    # the executable, not in libc.so; it resolves when a program loads
+    # libgallium. (A shared libLLVM, as FreeBSD ports use, is linked without
+    # --no-undefined for the same reason.)
+    meson_build "${clc[@]}" -Db_lundef=false \
         -Dplatforms=x11 -Dglx=dri -Degl=enabled -Dgbm=enabled -Dglvnd=enabled \
         -Dgallium-drivers="$drivers" -Dvulkan-drivers= \
         -Dllvm=enabled -Dshared-llvm=disabled -Ddraw-use-llvm=true -Damd-use-llvm=false \
