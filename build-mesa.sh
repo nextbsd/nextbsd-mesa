@@ -335,7 +335,7 @@ build_libglvnd() {
     so_check libGLdispatch.so.0 libGL.so.1 libGLX.so.0 libOpenGL.so.0 libEGL.so.1 \
              libGLESv1_CM.so.1 libGLESv2.so.2
     lib_needs libGL.so.1 libGLdispatch.so.0 libGLX.so.0
-    lib_needs libGLX.so.0 libGLdispatch.so.0 libX11.so.6 libXext.so.6
+    lib_needs libGLX.so.0 libGLdispatch.so.0 libX11.so.6
     has_string "$x/lib/libEGL.so.1" "$X_PREFIX/etc/glvnd/egl_vendor.d:$X_PREFIX/share/glvnd/egl_vendor.d"
     pc_check libglvnd "$VERSION"
     pc_check gl
