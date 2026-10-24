@@ -1,0 +1,22 @@
+# sources.lock: every upstream source nextbsd-mesa builds, pinned.
+#
+# One line per component:  <name> <version> <sha256> <url>
+# <name> matches build_<name> in build-mesa.sh (hyphens as underscores) and
+# patches/<name>/. build-mesa.sh downloads <url>, refuses it unless its
+# SHA-256 is <sha256>, and unpacks it. Only upstream release tarballs (or tag
+# archives) are listed: no FreeBSD packages or ports distfiles. Bumping a
+# version is a deliberate change to this file.
+#
+# Not listed, because they are not upstream sources built here: nextbsd-xlibs'
+# `continuous` artifact (libdrm, the X client libraries, expat), staged into
+# the sysroot by CI, and nextbsd-toolchain's static LLVM 19.1.7 (release
+# llvm-static-19.1.7, checked against its .sha256 by CI).
+
+# libglvnd: the release tarball attached to upstream's v1.7.0 release. SHA-256
+# also matches FreeBSD ports' graphics/libglvnd/distinfo.
+libglvnd  1.7.0   13ae5bb99a5a2869fbe00aadb49b21fd9c13dfbf59844b0f88d521098094d44a  https://gitlab.freedesktop.org/glvnd/libglvnd/uploads/c24806c283070dc70700234ca8ffacf8/libglvnd-1.7.0.tar.gz
+# Mesa: SHA-256 matches upstream's docs/relnotes/26.2.5.rst. E23 D5: 26.2.x,
+# moving to 26.3.x around 26.3.1.
+mesa      26.2.5  794b3d1729075dae7ebd47c7283b7ca0cdb5dec668f7f11cc0a5d82f6138a0a5  https://archive.mesa3d.org/mesa-26.2.5.tar.xz
+# libGLU (mesa/glu): SHA-256 also matches FreeBSD ports' graphics/libGLU/distinfo.
+glu       9.0.3   bd43fe12f374b1192eb15fe20e45ff456b9bc26ab57f0eee919f96ca0f8a330f  https://archive.mesa3d.org/glu/glu-9.0.3.tar.xz

@@ -1,0 +1,62 @@
+Description: v3d: fail a BO map instead of abort()ing
+ A renderonly scanout BO belongs to the display device (vc4), so
+ DRM_IOCTL_V3D_MMAP_BO on it fails by design, and modesetting asks GBM to
+ CPU-map exactly such a BO when TearFree is on. abort() took the X server
+ down (nextbsd/nextbsd#451). Return NULL instead; v3d_resource_transfer_map()
+ already handles a NULL map.
+Origin: nextbsd-ports 85c0450876cc, graphics/mesa-dri/files/patch-src_gallium_drivers_v3d_v3d__bufmgr.c
+Forwarded: no
+---
+--- a/src/gallium/drivers/v3d/v3d_bufmgr.c
++++ b/src/gallium/drivers/v3d/v3d_bufmgr.c
+@@ -511,8 +511,24 @@
+         ret = v3d_ioctl(bo->screen->fd, DRM_IOCTL_V3D_MMAP_BO, &map);
+         offset = map.offset;
+         if (ret != 0) {
++                /*
++                 * Not fatal. A renderonly scanout BO belongs to the display
++                 * device, not to v3d, so DRM_IOCTL_V3D_MMAP_BO on it fails by
++                 * design -- and modesetting asks gbm to CPU-map exactly such a
++                 * BO when TearFree is on. Aborting here takes the X server
++                 * down with it (nextbsd#451).
++                 *
++                 * v3d_resource_transfer_map(), the caller that matters, already
++                 * handles a NULL return:
++                 *
++                 *      buf = v3d_bo_map(rsc->bo);
++                 *      if (!buf) { mesa_loge("Failed to map bo"); goto fail; }
++                 *
++                 * so failing the map is the contract the caller was already
++                 * written against.
++                 */
+                 mesa_loge("map ioctl failure");
+-                abort();
++                return NULL;
+         }
+ 
+         bo->map = mmap(NULL, bo->size, PROT_READ | PROT_WRITE, MAP_SHARED,
+@@ -520,7 +536,8 @@
+         if (bo->map == MAP_FAILED) {
+                 mesa_loge("mmap of bo %d (offset 0x%016llx, size %d) failed",
+                           bo->handle, (long long)offset, bo->size);
+-                abort();
++                bo->map = NULL;
++                return NULL;
+         }
+         VG(VALGRIND_MALLOCLIKE_BLOCK(bo->map, bo->size, 0, false));
+ 
+@@ -532,10 +549,13 @@
+ {
+         void *map = v3d_bo_map_unsynchronized(bo);
+ 
++        if (!map)
++                return NULL;
++
+         bool ok = v3d_bo_wait(bo, OS_TIMEOUT_INFINITE, "bo map");
+         if (!ok) {
+                 mesa_loge("BO wait for map failed");
+-                abort();
++                return NULL;
+         }
+         VG(VALGRIND_MAKE_MEM_DEFINED(map, bo->size));
+ 

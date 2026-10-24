@@ -1,0 +1,24 @@
+# Mesa 26.2.5 (sources.lock). Applied in order by build-mesa.sh.
+#
+# meson: the nextbsd-ports OS-name hunks (inert under the cross files, which
+# say system = 'freebsd'), and NextBSD's amdgpu-component fix (E23 D8).
+0001-meson-nextbsd-os-name.patch
+0002-meson-radeonsi-no-amdgpu-llvm-component.patch
+# Broadcom v3d (arm64), from nextbsd-ports.
+0003-v3d-bufmgr-fail-map-instead-of-abort.patch
+0004-v3d-resource-handle-null-map.patch
+0005-v3d-screen-no-texture-barrier.patch
+# Intel (iris, crocus; anv and hasvk in phase 2), from nextbsd-ports. They
+# apply now and are compiled once the Intel drivers are on (README, Intel).
+0006-intel-userptr-unsynchronized-fallback.patch
+0007-intel-xe-clock-boottime-alias.patch
+# Build fix, from nextbsd-ports.
+0008-renderdoc-app-cc-freebsd.patch
+#
+# Not carried from nextbsd-ports graphics/mesa-dri/files (E23 D11):
+#   patch-meson.build's POWER8 hunk, patch-src_gallium_drivers_llvmpipe_lp__rast__tri.c
+#                                        PowerPC only
+#   patch-src_panfrost_perf_pan__perf.h  panfrost is not built
+#   patch-src_vulkan_wsi_wsi__common__wayland.c
+#                                        no Wayland
+#   01-freebsd.conf (driconf)            a kwin_x11 quirk, not a patch

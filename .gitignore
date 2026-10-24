@@ -1,0 +1,3 @@
+# Downloads, extracted sources, out-of-tree builds and generated cross files
+# from build-mesa.sh.
+.build/
