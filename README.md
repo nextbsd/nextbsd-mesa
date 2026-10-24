@@ -9,7 +9,9 @@ epic nextbsd/nextbsd#561), built by hand in this order:
 ```
 nextbsd-toolchain   clang/lld 19.1.7 (+ the tiny static LLVM for llvmpipe)
         │
-nextbsd-xlibs       libdrm + the X client libraries
+nextbsd-displayserver-support   libdrm, expat, ... in /usr (E25)
+        │
+nextbsd-xlibs       the X client libraries
         │
 nextbsd-mesa        Mesa + libglvnd (+ libGLU)                <- this repo
         │
@@ -34,11 +36,12 @@ It follows the
    (`libGL.so.1`, `libEGL.so.1`, `libgbm.so.1`). Mesa's DRI, GBM and GLVND
    paths are absolute under `/usr/X11`, so a FreeBSD Mesa in `/usr/local` can
    never mix in. Nothing goes in `/usr/local`, and nothing here ships `/etc`.
-5. **Inputs:** compat's `continuous` base, nextbsd-xlibs' `continuous`
-   artifact and nextbsd-toolchain's static LLVM; never `nextbsd-userland`.
+5. **Inputs:** compat's `continuous` base, nextbsd-displayserver-support's
+   and nextbsd-xlibs' `continuous` artifacts and nextbsd-toolchain's static
+   LLVM; never `nextbsd-userland`.
    Build tools come from the toolchain image and never ship.
-6. **pkgconf, never freedesktop's GPL pkg-config.** No D-Bus, Avahi, Wayland
-   or udev.
+6. **pkgconf, never freedesktop's GPL pkg-config.** No D-Bus, Avahi or
+   Wayland; nothing here links libudev.
 
 ## Layout
 
@@ -64,14 +67,15 @@ and yaml). CI stages the sysroot and the LLVM first:
 | Input | From | Where |
 |---|---|---|
 | NextBSD base | `nextbsd-freebsd-compat` release `continuous`, `nextbsd-base-<arch>.tar.gz` | `$SYSROOT` |
-| libdrm, X client libraries, `libxshmfence`, expat | `nextbsd-xlibs` release `continuous`, `nextbsd-xlibs-<arch>.tar.gz` | `$SYSROOT/usr/X11` |
+| libdrm, expat, pixman, freetype, fontconfig, libxkbcommon, xkeyboard-config, epoll-shim, libudev, libevdev, mtdev, libinput, linux-input-shim | `nextbsd-displayserver-support` release `continuous`, `nextbsd-displayserver-support-<arch>.tar.gz` | `$SYSROOT/usr` (`.pc` files in `/usr/libdata/pkgconfig`) |
+| X client libraries, `libxshmfence` | `nextbsd-xlibs` release `continuous`, `nextbsd-xlibs-<arch>.tar.gz` | `$SYSROOT/usr/X11` |
 | static LLVM 19.1.7 | `nextbsd-toolchain` release `llvm-static-19.1.7`, `nextbsd-llvm-static-19.1.7-<arch>.tar.xz`, checked against its `.sha256` | `$LLVM_STATIC` (`/opt/llvm-19-nextbsd-<arch>`) |
 
 | Variable | Meaning |
 |---|---|
 | `T` | target: `amd64` or `arm64` |
 | `TA` | FreeBSD `TARGET_ARCH`: `amd64` or `aarch64` |
-| `SYSROOT` | the staged base with nextbsd-xlibs in `/usr/X11`; scratch, since each component is installed into it |
+| `SYSROOT` | the staged base with nextbsd-displayserver-support in `/usr` and nextbsd-xlibs in `/usr/X11`; scratch, since each component is installed into it |
 | `LLVM_STATIC` | the unpacked static LLVM; its `bin/llvm-config` is a build-host program that answers for the target |
 | `CROSS_BINDIR` | the toolchain's clang, lld and LLVM binutils (set by the container image) |
 | `DESTDIR` | where to stage the artifact; default `/stage` |
@@ -86,6 +90,20 @@ that would replace a file of the base or of nextbsd-xlibs; no `.la` files or
 docs; `.pc` files in `lib/pkgconfig`, none naming `/usr/local` or a build
 path; no absolute symlinks. Then it checks sonames, `DT_NEEDED` entries
 (`llvm-readelf -d`), compiled-in paths and `.pc` resolution through pkgconf.
+
+The three inputs are unpacked in that order: base, displayserver-support,
+xlibs (E25 plan, migration step 2). Until nextbsd-xlibs#9, nextbsd-xlibs
+still ships its own `/usr/X11` copies of libdrm, expat, pixman, freetype,
+fontconfig and libxkbcommon (the same versions). The cross files put
+`/usr/libdata/pkgconfig` before `/usr/X11/lib/pkgconfig` on pkgconf's path,
+so Mesa takes libdrm and expat from `/usr`; the base and `/usr/X11` have no
+`.pc` file in common, so nothing else moves. `build-mesa.sh` checks that
+`libdrm.pc` and `expat.pc` (and on amd64 `libdrm_amdgpu.pc` and
+`libdrm_radeon.pc`) resolve to `/usr/libdata/pkgconfig`, and that none of
+the arguments meson recorded for those dependencies points into `/usr/X11`.
+`DT_NEEDED` names only sonames, so the result runs the same against either
+copy. The overwrite check covers all three inputs: every file in the sysroot
+before this repo's first component is on its list.
 
 ```
 ./build-mesa.sh                 # every component
@@ -138,10 +156,25 @@ covers only this repo's harness. freeglut is not built: nothing calls GLUT.
   `/usr/X11` instead of `/usr/local` (D15,
   nextbsd/nextbsd-kernel-extensions-nvidia#2). `GBM_BACKENDS_PATH` still
   overrides it.
+- **EGL platforms** (E25 D8): `-Dplatforms=x11` is the only platform
+  option. Mesa's meson adds **`surfaceless`** whenever EGL is built and
+  **`drm`** (EGL on GBM) whenever GBM is too, so `-Degl=enabled
+  -Dgbm=enabled` already give a display server without X what it needs:
+  `EGL_KHR_platform_gbm` / `EGL_MESA_platform_gbm`,
+  `EGL_MESA_platform_surfaceless`, `EGL_EXT_platform_device` and GLES2. No
+  option changes for that. `build-mesa.sh` checks that the drm,
+  surfaceless, device and x11 EGL platforms are built, that
+  `libEGL_mesa.so.0` carries those extension strings and links `libgbm.so.1`,
+  and that libglvnd's `libEGL.so.1` (what an EGL-only client links) has no
+  `libX11` or `libxcb` in `DT_NEEDED`; it prints both libraries'
+  `DT_NEEDED`. `libEGL_mesa.so.0` links the X client libraries for the x11
+  platform but connects to no X server unless a client asks for it.
 - **Off:** Vulkan, lavapipe, zink (phase 2, nextbsd/nextbsd-mesa#2), Wayland,
-  udev, VA, rusticl, valgrind, libunwind, lm_sensors, zstd (base's is
-  private), tools, tests and docs. zlib and libelf come from the base, expat
-  from nextbsd-xlibs.
+  VA, rusticl, valgrind, libunwind, lm_sensors, zstd (base's is private),
+  tools, tests and docs. meson finds displayserver-support's `libudev`, but
+  only Vulkan's WSI uses it, so nothing here links it (checked on
+  `libgallium`). zlib and libelf come from the base, libdrm and expat from
+  nextbsd-displayserver-support.
 
 ### Intel (iris and crocus)
 
