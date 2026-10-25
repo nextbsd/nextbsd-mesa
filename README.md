@@ -79,7 +79,7 @@ and yaml). CI stages the sysroot and the LLVM first:
 | `LLVM_STATIC` | the unpacked static LLVM; its `bin/llvm-config` is a build-host program that answers for the target |
 | `CROSS_BINDIR` | the toolchain's clang, lld and LLVM binutils (set by the container image) |
 | `DESTDIR` | where to stage the artifact; default `/stage` |
-| `INTEL_DRIVERS` | `auto` (default), `on` or `off`; see [Intel](#intel-iris-and-crocus) |
+| `INTEL_DRIVERS` | `on` (default), `auto` or `off`; see [Intel](#intel-iris-and-crocus) |
 
 For each component, in `COMPONENTS` order, it downloads and checks the
 tarball, applies `patches/<name>/series`, runs meson with two cross files (one
@@ -119,11 +119,11 @@ before this repo's first component is on its list.
 | `mesa` | 26.2.5 | `libGLX_mesa.so.0` (+ `libGLX_indirect.so.0` link), `libEGL_mesa.so.0` + `share/glvnd/egl_vendor.d/50_mesa.json`, `libgbm.so.1` + `lib/gbm/dri_gbm.so`, `libgallium-26.2.5.so`, `lib/dri/*_dri.so` (links to `libdril_dri.so`), `share/drirc.d` | nextbsd/nextbsd-mesa#1 |
 | `glu` | 9.0.3 | `libGLU.so.1`, `GL/glu.h` (E24: Gershwin's ItemFlow and Player, libs-quartzcore) | nextbsd/nextbsd-mesa#1 |
 
-Installed size (first CI build, iris and crocus not built):
+Installed size (CI, with iris and crocus on amd64, nextbsd/nextbsd-mesa#6):
 
 | Arch | `/usr/X11` from this repo | of which `libgallium-26.2.5.so` (LLVM inside) | artifact (`.tar.gz`) |
 |---|---|---|---|
-| amd64 | 84 MiB | 77 MiB | 26 MiB |
+| amd64 | 96 MiB (iris and crocus: +12.3 MiB) | 89 MiB | 30 MiB |
 | arm64 | 77 MiB | 68 MiB | 23 MiB |
 
 Licences are per component; see `NOTICE.md`. The top-level `LICENSE` (BSD-2)
@@ -140,7 +140,7 @@ covers only this repo's harness. freeglut is not built: nothing calls GLUT.
 
 | Arch | Gallium drivers | DRI names |
 |---|---|---|
-| amd64 | `radeonsi` (ACO only), `r600`, `virgl`, `llvmpipe`, `softpipe`; `iris`, `crocus` when the mesa_clc tools are present | `radeonsi`, `r600`, `virtio_gpu`, `swrast`, `kms_swrast` (+ `iris`, `crocus`) |
+| amd64 | `iris`, `crocus`, `radeonsi` (ACO only), `r600`, `virgl`, `llvmpipe`, `softpipe` | `iris`, `crocus`, `radeonsi`, `r600`, `virtio_gpu`, `swrast`, `kms_swrast` |
 | arm64 | `v3d`, `vc4`, `virgl`, `llvmpipe`, `softpipe` | `v3d`, `vc4` and the kmsro display names, `virtio_gpu`, `swrast`, `kms_swrast` |
 
 - **LLVM** is linked statically into `libgallium` only (D3); no `libLLVM`
@@ -183,19 +183,23 @@ iris and crocus compile Intel's internal shaders while Mesa builds, with
 SPIRV-LLVM-Translator and SPIRV-Tools (D7). nextbsd-toolchain#11 puts those
 host libraries in the toolchain image at `/opt/mesa-clc`.
 
-`build-mesa.sh` checks for `/opt/mesa-clc/bin/llvm-config`:
+On amd64, `build-mesa.sh` builds `mesa_clc` and `vtn_bindgen2` natively,
+against `/opt/mesa-clc` and from the same patched Mesa tree (no drivers or
+platforms). It then cross-builds Mesa with `-Dmesa-clc=system` and `iris,crocus`
+added to the drivers. The two tools and the host libraries are build input only.
+The build checks that:
 
-- **present:** it builds `mesa_clc` and `vtn_bindgen2` natively from the same
-  patched Mesa tree (no drivers or platforms), then cross-builds Mesa with
-  `-Dmesa-clc=system` and `iris,crocus` added to the amd64 drivers;
-- **absent:** it skips iris and crocus with a note in the log. Intel GPUs then
-  fall back to llvmpipe.
+- iris and crocus are in the build, and the cross build runs the build-host
+  `mesa_clc` instead of compiling its own;
+- nothing of that toolchain is staged: no `mesa_clc`, no `vtn_bindgen2`, no
+  libLLVM, libclang or SPIRV library, and no `/opt/mesa-clc` path in any file;
+- every `DT_NEEDED` of every installed library resolves to the base,
+  nextbsd-displayserver-support, nextbsd-xlibs or this repo.
 
-The image CI uses today predates nextbsd-toolchain#11, so **iris and crocus
-are not built yet**; the next published toolchain image turns them on with
-no change here. `INTEL_DRIVERS=on` makes their absence an error,
-`INTEL_DRIVERS=off` skips them. The Intel patches (`0006`, `0007`) are
-applied already and are compiled once the drivers are on.
+`INTEL_DRIVERS=on` (the default) makes a missing `/opt/mesa-clc` an error.
+`auto` skips iris and crocus in that case, and Intel GPUs then fall back to
+llvmpipe. `off` never builds them. arm64 builds neither. The Intel patches
+(`0006`, `0007`) are compiled with the drivers.
 
 ### Patches
 
@@ -227,10 +231,6 @@ drivers, data, and the headers and `.pc` files that `nextbsd-xlibre` stages
 into its sysroot (glamor needs `gbm` and `egl`, GLX needs `dri.pc`). Splitting
 runtime from development files is `nextbsd-pkg`'s job (E23 D13,
 `NextBSD-mesa`).
-
-Until the toolchain image carries Python's `packaging` (nextbsd-toolchain#11),
-the workflow installs `python3-packaging` in the container: Mesa's meson
-needs it, and Ubuntu 24.04's Python has no distutils.
 
 Nothing is dispatched from here, and nothing dispatches here. `nextbsd-xlibre`
 and `nextbsd-pkg` are run by hand once this build is known good. There is no
