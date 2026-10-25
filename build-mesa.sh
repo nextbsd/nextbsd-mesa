@@ -448,7 +448,8 @@ EOF
         -Dgles1=disabled -Dgles2=disabled \
         -Dzlib=disabled -Dexpat=disabled -Dxmlconfig=disabled
     meson compile -C "$nb"
-    meson install -C "$nb" --no-rebuild
+    # Not into $DESTDIR (exported for the cross build): these tools never ship.
+    env -u DESTDIR meson install -C "$nb" --no-rebuild
     [ -x "$host/bin/mesa_clc" ] && [ -x "$host/bin/vtn_bindgen2" ] \
         || fail "native build did not install mesa_clc and vtn_bindgen2"
     CLC_NATIVE="$BUILD/cross/mesa-clc-tools.ini"
