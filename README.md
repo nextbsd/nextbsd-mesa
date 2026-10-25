@@ -119,11 +119,11 @@ before this repo's first component is on its list.
 | `mesa` | 26.2.5 | `libGLX_mesa.so.0` (+ `libGLX_indirect.so.0` link), `libEGL_mesa.so.0` + `share/glvnd/egl_vendor.d/50_mesa.json`, `libgbm.so.1` + `lib/gbm/dri_gbm.so`, `libgallium-26.2.5.so`, `lib/dri/*_dri.so` (links to `libdril_dri.so`), `share/drirc.d` | nextbsd/nextbsd-mesa#1 |
 | `glu` | 9.0.3 | `libGLU.so.1`, `GL/glu.h` (E24: Gershwin's ItemFlow and Player, libs-quartzcore) | nextbsd/nextbsd-mesa#1 |
 
-Installed size (first CI build, iris and crocus not built):
+Installed size (CI, with iris and crocus on amd64, nextbsd/nextbsd-mesa#6):
 
 | Arch | `/usr/X11` from this repo | of which `libgallium-26.2.5.so` (LLVM inside) | artifact (`.tar.gz`) |
 |---|---|---|---|
-| amd64 | 84 MiB | 77 MiB | 26 MiB |
+| amd64 | 96 MiB (iris and crocus: +12.3 MiB) | 89 MiB | 30 MiB |
 | arm64 | 77 MiB | 68 MiB | 23 MiB |
 
 Licences are per component; see `NOTICE.md`. The top-level `LICENSE` (BSD-2)
