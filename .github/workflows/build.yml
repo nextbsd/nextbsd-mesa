@@ -46,23 +46,12 @@ jobs:
     container:
       # Per-arch toolchain image: the pinned llvmorg-19.1.7 clang, lld and LLVM
       # binutils at $CROSS_BINDIR (set by the image), plus meson 1.12.1, ninja,
-      # pkgconf, bison, flex and python3 with mako and yaml
-      # (nextbsd-toolchain#13). Once rebuilt with nextbsd-toolchain#11 it also
+      # pkgconf, bison, flex and python3 with mako, yaml and packaging
+      # (nextbsd-toolchain#13). Since nextbsd-toolchain#11 it also
       # carries /opt/mesa-clc, and build-mesa.sh then adds iris and crocus.
       image: ghcr.io/nextbsd/nextbsd-kernel-toolchain:${{ matrix.arch }}-${{ inputs.fbsd_sha && format('fbsd-{0}', inputs.fbsd_sha) || 'latest' }}
     steps:
       - uses: actions/checkout@v4
-
-      # Mesa's meson needs Python's `packaging` (Ubuntu 24.04's Python 3.12
-      # has no distutils). nextbsd-toolchain#11 adds it to the image; until
-      # that image is published, install it here. Remove this step then.
-      - name: Python packaging for Mesa's meson (until the image has it)
-        run: |
-          if ! python3 -c 'import packaging.version' 2>/dev/null; then
-            apt-get update
-            apt-get install -y --no-install-recommends python3-packaging
-          fi
-          python3 -c 'import packaging, mako, yaml; print("packaging", packaging.__version__, "mako", mako.__version__)'
 
       # Stage the cross sysroot, in the order the repos build (E25 plan,
       # migration step 2):

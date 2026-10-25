@@ -49,11 +49,11 @@ set -euo pipefail
 : "${LLVM_STATIC:?set LLVM_STATIC to the unpacked llvm-19-nextbsd-<arch> tree}"
 : "${DESTDIR:=/stage}"
 # Host libraries for Intel's mesa_clc (nextbsd-toolchain#11), in the toolchain
-# image once it is rebuilt with them. See build_mesa and README "Intel".
+# image. See build_mesa and README "Intel".
 : "${MESA_CLC_HOST:=/opt/mesa-clc}"
-# auto: build iris and crocus when $MESA_CLC_HOST is there, skip them (with a
-# note) when it isn't; on: require it; off: never.
-: "${INTEL_DRIVERS:=auto}"
+# amd64 only. on (default): build iris and crocus, and fail if $MESA_CLC_HOST
+# is missing; auto: skip them (with a note) when it is missing; off: never.
+: "${INTEL_DRIVERS:=on}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD="$ROOT/.build"
@@ -404,10 +404,9 @@ build_libglvnd() {
 # Intel's internal shaders are compiled at build time by mesa_clc and
 # vtn_bindgen2, two build-host programs (E23 D7). Their host libraries (clang,
 # LLVM, SPIRV-LLVM-Translator, SPIRV-Tools for x86_64 Linux) are in the
-# toolchain image at $MESA_CLC_HOST once it is rebuilt with nextbsd-toolchain#11.
-# When they are there, build the two tools natively from the same patched Mesa
-# tree (the E23 audit's option (b); nextbsd-toolchain mesa-clc/README.md):
-# no drivers, no platforms, nothing that needs target libraries. The cross
+# toolchain image at $MESA_CLC_HOST (nextbsd-toolchain#11). Build the two
+# tools natively from the same patched Mesa tree (the E23 audit's option (b);
+# nextbsd-toolchain mesa-clc/README.md): no drivers, no platforms, nothing that needs target libraries. The cross
 # build then runs them with -Dmesa-clc=system. Sets INTEL_ON and CLC_NATIVE.
 host_mesa_clc() {
     INTEL_ON=0
@@ -424,9 +423,9 @@ host_mesa_clc() {
     fi
     if [ ! -x "$MESA_CLC_HOST/bin/llvm-config" ]; then
         [ "$INTEL_DRIVERS" = on ] && fail "INTEL_DRIVERS=on but $MESA_CLC_HOST/bin/llvm-config is missing"
-        note "NOTE: $MESA_CLC_HOST is not in this toolchain image (nextbsd-toolchain#11 not"
-        note "      published yet): iris and crocus are NOT built; Intel GPUs fall back"
-        note "      to llvmpipe (E23 D7). The next image turns them on with no change here."
+        note "NOTE: INTEL_DRIVERS=auto and $MESA_CLC_HOST is not in this toolchain"
+        note "      image: iris and crocus are NOT built; Intel GPUs fall back to"
+        note "      llvmpipe (E23 D7)."
         return 0
     fi
     comp "mesa_clc + vtn_bindgen2 [meson native, build host only]"
@@ -468,9 +467,9 @@ EOF
 # the dri/*_dri.so links to libdril_dri.so (the X server's GLX loads them).
 #
 # Drivers (E23 D6):
-#   amd64  radeonsi (ACO only, -Damd-use-llvm=false), r600, virgl, llvmpipe,
-#          softpipe; iris and crocus when the mesa_clc host tools are present
-#          (host_mesa_clc)
+#   amd64  iris, crocus (their shaders compiled by the build-host mesa_clc,
+#          host_mesa_clc), radeonsi (ACO only, -Damd-use-llvm=false), r600,
+#          virgl, llvmpipe, softpipe
 #   arm64  v3d, vc4 (with kmsro), virgl, llvmpipe, softpipe
 # No nouveau, no Vulkan, lavapipe or zink (phase 2, nextbsd-mesa#2).
 #
@@ -567,7 +566,7 @@ build_mesa() {
     # anything, and libgbm (which NVIDIA uses alone) stays free of LLVM and
     # libgallium.
     has_string "$gallium" "llvmpipe"
-    not_needed "$gallium" 'libLLVM|libclang|libwayland|libudev|libzstd'
+    not_needed "$gallium" 'libLLVM|libclang|libSPIRV|libwayland|libudev|libzstd'
     not_needed "$x/lib/libgbm.so.1" 'libLLVM|libgallium|libwayland'
     lib_needs libgbm.so.1 libdrm.so.2
     lib_needs libGLX_mesa.so.0 libX11.so.6 libxcb-dri3.so.0
@@ -583,6 +582,62 @@ build_mesa() {
     note "dri.pc: dridriverdir=$X_PREFIX/lib/dri"
     pc_check gbm "$VERSION"
     egl_platform_checks
+    [ "$INTEL_ON" = 1 ] && intel_checks
+    needed_closure
+    no_clc_host_files
+}
+
+# iris and crocus (E23 D6/D7) are compiled into libgallium: their sources are
+# in the build, their shaders were compiled by the build-host mesa_clc (Mesa
+# would otherwise have built its own), and libgallium carries Intel code.
+intel_checks() {
+    local d
+    for d in iris crocus; do
+        grep -q -F "src/gallium/drivers/$d/" "$COMP_BUILD/build.ninja" || fail "$d is not in the build"
+    done
+    has_string "$DESTDIR$X_PREFIX/lib/libgallium-$VERSION.so" INTEL_DEBUG
+    grep -q -F "$BUILD/mesa-clc-host/bin/mesa_clc" "$COMP_BUILD/build.ninja" \
+        || fail "the cross build does not run the build-host mesa_clc"
+    if grep -q -E 'src/compiler/clc/mesa_clc\b|build mesa_clc:' "$COMP_BUILD/build.ninja"; then
+        fail "the cross build compiles its own mesa_clc"
+    fi
+    note "iris and crocus built; Intel shaders compiled by the build-host mesa_clc"
+}
+
+# Every DT_NEEDED of every ELF object this repo installs resolves to the base,
+# nextbsd-displayserver-support or nextbsd-xlibs (a file listed in $BASE_LIST
+# under /lib, /usr/lib or /usr/X11/lib), or to a library this repo installs.
+needed_closure() {
+    local x="$DESTDIR$X_PREFIX" f n bad=0 all=
+    for f in $(find "$x" -type f \( -name '*.so' -o -name '*.so.*' \)); do
+        for n in $("$CROSS_BINDIR/llvm-readelf" -d "$f" 2>/dev/null | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p'); do
+            if [ -e "$x/lib/$n" ]; then
+                :
+            elif grep -q -x -e "lib/$n" -e "usr/lib/$n" -e "usr/X11/lib/$n" "$BASE_LIST"; then
+                :
+            else
+                echo "FAIL: ${f#"$DESTDIR"} needs $n, which is in neither the sysroot inputs nor this repo" >&2
+                bad=1
+            fi
+            all="$all $n"
+        done
+    done
+    [ "$bad" = 0 ] || fail "unresolved DT_NEEDED entries"
+    note "every DT_NEEDED resolves to base, displayserver-support, xlibs or this repo:" \
+        "$(printf '%s\n' $all | LC_ALL=C sort -u | tr '\n' ' ')"
+}
+
+# Nothing of the build-host mesa_clc toolchain ships: no mesa_clc or
+# vtn_bindgen2, no LLVM, clang or SPIR-V library, no $MESA_CLC_HOST or
+# build-host tool path compiled in.
+no_clc_host_files() {
+    local bad
+    bad=$(cd "$DESTDIR" && find . \( -name 'mesa_clc*' -o -name 'vtn_bindgen*' -o -name 'libLLVM*' \
+        -o -name 'libclang*' -o -name '*SPIRV*' -o -name '*spirv-tools*' \) -print)
+    [ -z "$bad" ] || fail "build-host mesa_clc files staged: $bad"
+    bad=$(grep -r -l -a -F -e "$MESA_CLC_HOST" -e "$BUILD/mesa-clc-host" "$DESTDIR" || true)
+    [ -z "$bad" ] || fail "staged files name the build-host mesa_clc toolchain: $bad"
+    note "nothing from the build-host mesa_clc toolchain ($MESA_CLC_HOST) is staged"
 }
 
 # EGL platforms (E25 D8, audit 2 R1). -Dplatforms=x11 is the only platform
