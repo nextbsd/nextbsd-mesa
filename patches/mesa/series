@@ -14,6 +14,9 @@
 0007-intel-xe-clock-boottime-alias.patch
 # Build fix, from nextbsd-ports.
 0008-renderdoc-app-cc-freebsd.patch
+# Build fix, NextBSD's own: dri_gbm needs the xcb headers when the X11
+# platform is built, which only showed once libdrm moved to /usr (E25).
+0009-gbm-dri-xcb-headers.patch
 #
 # Not carried from nextbsd-ports graphics/mesa-dri/files (E23 D11):
 #   patch-meson.build's POWER8 hunk, patch-src_gallium_drivers_llvmpipe_lp__rast__tri.c

@@ -25,11 +25,13 @@
 # EXECUTION CONTEXT (set up by CI before this runs)
 #   Inside the nextbsd-kernel-toolchain container (pinned clang/lld 19.1.7 in
 #   $CROSS_BINDIR, meson, ninja, pkgconf, bison, flex, python3 with mako and
-#   yaml), with $SYSROOT holding compat's `continuous` base and nextbsd-xlibs'
-#   `continuous` artifact (libdrm, the X client libraries, expat in /usr/X11),
-#   and $LLVM_STATIC holding nextbsd-toolchain's static LLVM 19.1.7 for this
-#   arch. $SYSROOT is scratch: this script installs every component into its
-#   /usr/X11 as it goes.
+#   yaml), with $SYSROOT holding, in this order, compat's `continuous` base,
+#   nextbsd-displayserver-support's `continuous` artifact (libdrm, expat and
+#   the other shared display-server libraries in /usr, .pc files in
+#   /usr/libdata/pkgconfig) and nextbsd-xlibs' `continuous` artifact (the X
+#   client libraries in /usr/X11), and $LLVM_STATIC holding
+#   nextbsd-toolchain's static LLVM 19.1.7 for this arch. $SYSROOT is scratch:
+#   this script installs every component into its /usr/X11 as it goes.
 #
 # USAGE
 #   ./build-mesa.sh               every component, in COMPONENTS order
@@ -42,7 +44,7 @@ set -euo pipefail
 # ---- required environment ----------------------------------------------------
 : "${T:?set T to the target (amd64 / arm64)}"
 : "${TA:?set TA to the target_arch (amd64 / aarch64)}"
-: "${SYSROOT:?set SYSROOT to the staged NextBSD base with nextbsd-xlibs in /usr/X11}"
+: "${SYSROOT:?set SYSROOT to the staged NextBSD base with nextbsd-displayserver-support and nextbsd-xlibs}"
 : "${CROSS_BINDIR:?set CROSS_BINDIR to the dir holding the cross clang/lld}"
 : "${LLVM_STATIC:?set LLVM_STATIC to the unpacked llvm-19-nextbsd-<arch> tree}"
 : "${DESTDIR:=/stage}"
@@ -77,6 +79,12 @@ SYSROOT="$(cd "$SYSROOT" && pwd)"
 LLVM_STATIC="$(cd "$LLVM_STATIC" && pwd)"
 LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
 export SYSROOT DESTDIR CROSS_BINDIR
+
+# pkgconf's search path inside the sysroot, in the cross files' order:
+# /usr/libdata/pkgconfig (the base and nextbsd-displayserver-support) before
+# $X_PREFIX/lib/pkgconfig, so libdrm and expat come from /usr even while
+# nextbsd-xlibs still ships copies in /usr/X11 (E25 plan, migration step 2).
+PC_PATH="$SYSROOT/usr/libdata/pkgconfig:$SYSROOT$X_PREFIX/lib/pkgconfig"
 
 # ---- helpers -----------------------------------------------------------------
 comp() { echo; echo "==> [$T/$TA] $*"; }
@@ -225,13 +233,16 @@ EOF
     DESTDIR="$COMP_ROOT" meson install -C "$COMP_BUILD" --no-rebuild
 }
 
-# The files already in the sysroot (compat's base plus nextbsd-xlibs'
-# artifact, which CI stages under it), listed while the sysroot doesn't yet
-# hold anything from this repo, so stage can refuse a component that would
-# overwrite one. A later partial run reuses the list.
+# The files already in the sysroot (compat's base, nextbsd-displayserver-
+# support's and nextbsd-xlibs' artifacts, which CI stages over it), listed
+# while the sysroot doesn't yet hold anything from this repo, so stage can
+# refuse a component that would overwrite one. A later partial run reuses the
+# list.
 base_list() {
     BASE_LIST="$BUILD/base-files-$T.list"
     mkdir -p "$BUILD"
+    [ -f "$SYSROOT/usr/libdata/pkgconfig/libdrm.pc" ] && [ -f "$SYSROOT/usr/libdata/pkgconfig/libinput.pc" ] \
+        || fail "nextbsd-displayserver-support is not staged in $SYSROOT/usr (no libdrm.pc/libinput.pc in /usr/libdata/pkgconfig)"
     [ -f "$SYSROOT$X_PREFIX/lib/pkgconfig/x11.pc" ] \
         || fail "nextbsd-xlibs is not staged in $SYSROOT$X_PREFIX (no x11.pc)"
     if [ ! -e "$SYSROOT$X_PREFIX/lib/pkgconfig/libglvnd.pc" ]; then
@@ -244,7 +255,7 @@ base_list() {
 # stage <name>: tidy and check $COMP_ROOT, then copy it into $SYSROOT (for the
 # components after this one) and $DESTDIR (the artifact).
 #   - everything must be under /usr/X11, and nothing may replace a file of the
-#     base or of nextbsd-xlibs;
+#     base, nextbsd-displayserver-support or nextbsd-xlibs;
 #   - libtool .la files and docs are dropped (man pages are kept);
 #   - .pc files from share/pkgconfig and libdata/pkgconfig move to
 #     lib/pkgconfig;
@@ -283,7 +294,7 @@ stage() {
     done
     find "$x" -type d -empty -delete
     clash=$(cd "$COMP_ROOT" && find . ! -type d | sed 's#^\./##' | LC_ALL=C sort | LC_ALL=C comm -12 - "$BASE_LIST")
-    [ -z "$clash" ] || fail "$name would replace files of the NextBSD base or nextbsd-xlibs: $clash"
+    [ -z "$clash" ] || fail "$name would replace files of the NextBSD base, nextbsd-displayserver-support or nextbsd-xlibs: $clash"
     (cd "$COMP_ROOT" && tar -cf - .) | (cd "$SYSROOT" && tar -xf -)
     (cd "$COMP_ROOT" && tar -cf - .) | (cd "$DESTDIR" && tar -xf -)
     note "staged $(cd "$COMP_ROOT" && find . ! -type d | wc -l) files, $(du -sk "$COMP_ROOT" | cut -f1) KiB"
@@ -293,10 +304,48 @@ stage() {
 # later components (and nextbsd-xlibre) will see it.
 pc_check() {
     local mod="$1" want="${2:-}" got
-    got=$(PKG_CONFIG_LIBDIR="$SYSROOT$X_PREFIX/lib/pkgconfig:$SYSROOT/usr/libdata/pkgconfig" PKG_CONFIG_SYSROOT_DIR="$SYSROOT" \
+    got=$(PKG_CONFIG_LIBDIR="$PC_PATH" PKG_CONFIG_SYSROOT_DIR="$SYSROOT" \
           pkgconf --modversion "$mod") || fail "pkgconf cannot resolve $mod"
     [ -z "$want" ] || [ "$got" = "$want" ] || fail "$mod.pc is version $got, expected $want"
     note "pkgconf ok: $mod $got"
+}
+
+# pc_from_usr <module>...: pkgconf, searching the cross files' path, finds
+# each module's .pc in /usr/libdata/pkgconfig (nextbsd-displayserver-support),
+# not in $X_PREFIX/lib/pkgconfig (nextbsd-xlibs' copies, until
+# nextbsd-xlibs#9).
+pc_from_usr() {
+    local mod pc
+    for mod in "$@"; do
+        pc=$(PKG_CONFIG_LIBDIR="$PC_PATH" PKG_CONFIG_SYSROOT_DIR="$SYSROOT" pkgconf --path "$mod") \
+            || fail "pkgconf cannot resolve $mod"
+        [ "$pc" = "$SYSROOT/usr/libdata/pkgconfig/$mod.pc" ] \
+            || fail "$mod resolves to ${pc#"$SYSROOT"}, not /usr/libdata/pkgconfig/$mod.pc"
+        note "pkgconf: $mod -> /usr/libdata/pkgconfig/$mod.pc" \
+            "($(PKG_CONFIG_LIBDIR="$PC_PATH" pkgconf --modversion "$mod"))"
+    done
+}
+
+# meson_deps_from_usr <regex>: every external dependency of the configured
+# $COMP_BUILD whose name matches <regex> was found, and none of its compile or
+# link arguments points into $X_PREFIX (so the headers and libraries meson
+# uses are the /usr copies). Prints what meson recorded.
+meson_deps_from_usr() {
+    meson introspect "$COMP_BUILD" --dependencies | python3 -I -c '
+import json, re, sys
+pat, sysroot, xp = sys.argv[1], sys.argv[2], sys.argv[3]
+deps = [d for d in json.load(sys.stdin) if re.fullmatch(pat, d["name"])]
+if not deps:
+    sys.exit("FAIL: meson found no dependency matching " + pat)
+bad = 0
+for d in deps:
+    args = [a.replace(sysroot, "<sysroot>") for a in d.get("compile_args", []) + d.get("link_args", [])]
+    print("    - meson dep %s %s: %s" % (d["name"], d.get("version", "?"), " ".join(args) or "(no args)"))
+    if any(xp + "/" in a for a in args):
+        print("FAIL: meson dependency %s uses %s" % (d["name"], xp), file=sys.stderr)
+        bad = 1
+sys.exit(bad)
+' "$1" "$SYSROOT" "$X_PREFIX" || fail "meson dependencies matching $1 do not all come from /usr"
 }
 
 # The static LLVM (nextbsd-toolchain release llvm-static-19.1.7) is the
@@ -436,13 +485,20 @@ EOF
 # instead of /usr/local (D15, nextbsd-kernel-extensions-nvidia#2).
 #
 # Off: Wayland, udev, valgrind, libunwind, lm_sensors, zstd (base's is
-# private), VA, rusticl, tools, tests, docs. expat (driconf) is nextbsd-xlibs';
-# zlib and libelf are the base's.
+# private), VA, rusticl, tools, tests, docs. libdrm and expat (driconf) are
+# nextbsd-displayserver-support's, in /usr; zlib and libelf are the base's.
+# displayserver-support's libudev is found by meson but only Vulkan's WSI uses
+# it, so nothing here links it (checked on libgallium below).
 build_mesa() {
     comp "Mesa [meson cross]"
     fresh_dirs mesa
     fetch mesa
     llvm_check
+    # libdrm and expat resolve to nextbsd-displayserver-support's .pc files.
+    pc_from_usr libdrm expat
+    if [ "$T" = amd64 ]; then
+        pc_from_usr libdrm_amdgpu libdrm_radeon
+    fi
     host_mesa_clc
     local drivers clc=()
     case "$T" in
@@ -471,6 +527,11 @@ build_mesa() {
         -Dlmsensors=disabled -Dzstd=disabled -Dzlib=enabled -Dexpat=enabled \
         -Dxmlconfig=enabled -Ddisplay-info=disabled -Dvideo-codecs= \
         -Dtools= -Dbuild-tests=false -Dhtml-docs=disabled
+    # libdrm (and libdrm_amdgpu/libdrm_radeon on amd64) and expat are
+    # nextbsd-displayserver-support's in /usr, not nextbsd-xlibs' /usr/X11
+    # copies (E25 plan, migration step 2). Same versions and sonames, so the
+    # result runs the same against either.
+    meson_deps_from_usr 'libdrm(_.*)?|expat'
     # GLX falls back to the "indirect" vendor when the server names none
     # (libglvnd's libglxmapping.c); point it at Mesa, as FreeBSD does with
     # libmap. NVIDIA overrides it with its own libmap entry.
@@ -521,6 +582,37 @@ build_mesa() {
         || fail "dri.pc dridriverdir is not $X_PREFIX/lib/dri"
     note "dri.pc: dridriverdir=$X_PREFIX/lib/dri"
     pc_check gbm "$VERSION"
+    egl_platform_checks
+}
+
+# EGL platforms (E25 D8, audit 2 R1). -Dplatforms=x11 is the only platform
+# option given, and none is added for the WindowServer: Mesa's meson adds
+# `surfaceless` whenever EGL is built and `drm` (the GBM platform) whenever GBM
+# is too, so -Degl=enabled -Dgbm=enabled already provide EGL on GBM, with
+# EGL_KHR_platform_gbm/EGL_MESA_platform_gbm, EGL_MESA_platform_surfaceless and
+# EGL_EXT_platform_device. Check that they are built, and that libglvnd's
+# libEGL.so.1 (what an EGL-only client such as the WindowServer links) needs
+# nothing from X; only Mesa's vendor library libEGL_mesa.so.0 links the X
+# client libraries, and it connects to no X server unless asked for the x11
+# platform.
+egl_platform_checks() {
+    local x="$DESTDIR$X_PREFIX" p f
+    for p in DRM SURFACELESS X11 XCB; do
+        grep -q -F -- "-DHAVE_${p}_PLATFORM" "$COMP_BUILD/build.ninja" \
+            || fail "Mesa configured without the ${p,,} EGL platform (no -DHAVE_${p}_PLATFORM)"
+    done
+    for f in platform_drm.c platform_surfaceless.c platform_device.c platform_x11.c; do
+        grep -q -F "src/egl/drivers/dri2/$f" "$COMP_BUILD/build.ninja" || fail "EGL $f not built"
+    done
+    note "EGL platforms built: drm (GBM), surfaceless, device, x11, xcb"
+    for p in EGL_KHR_platform_gbm EGL_MESA_platform_gbm EGL_MESA_platform_surfaceless EGL_EXT_platform_device; do
+        has_string "$x/lib/libEGL_mesa.so.0" "$p"
+    done
+    lib_needs libEGL_mesa.so.0 libgbm.so.1 libdrm.so.2
+    not_needed "$x/lib/libEGL.so.1" 'libX11|libxcb'
+    for f in libEGL.so.1 libEGL_mesa.so.0 gbm/dri_gbm.so; do
+        note "$f NEEDED: $("$CROSS_BINDIR/llvm-readelf" -d "$x/lib/$f" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p' | tr '\n' ' ')"
+    done
 }
 
 # libGLU — the OpenGL utility library (mesa/glu). Gershwin's ItemFlow and
