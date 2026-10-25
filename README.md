@@ -60,7 +60,7 @@ unpacks into `.build/src/` and builds out of tree under `.build/`.
 
 ## Build model
 
-`build-mesa.sh` runs inside the `nextbsd-kernel-toolchain` container (the
+`build-mesa.sh` runs inside the `nextbsd-toolchain` container (the
 pinned clang/lld 19.1.7, meson, ninja, pkgconf, bison, flex, Python with mako
 and yaml). CI stages the sysroot and the LLVM first:
 
