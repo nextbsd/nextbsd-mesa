@@ -120,12 +120,15 @@ before this repo's first component is on its list.
 | `mesa` | 26.2.5 | core build: `libgallium-26.2.5.so`, `libEGL_mesa_core.so.0` + `share/glvnd/egl_vendor.d/50_mesa_core.json`, `libgbm.so.1` + `lib/gbm/dri_gbm.so`, `lib/dri/*_dri.so` (links to `libdril_dri.so`), `share/drirc.d`. X build: `libGLX_mesa.so.0` (+ `libGLX_indirect.so.0` link), `libEGL_mesa.so.0` + `share/glvnd/egl_vendor.d/50_mesa.json` | nextbsd/nextbsd-mesa#1, #10 |
 | `glu` | 9.0.3 | `libGLU.so.1`, `GL/glu.h` (E24: Gershwin's ItemFlow and Player, libs-quartzcore) | nextbsd/nextbsd-mesa#1 |
 
-Installed size (CI, with iris and crocus on amd64, nextbsd/nextbsd-mesa#6):
+Installed size (CI, with iris and crocus on amd64; nextbsd/nextbsd-mesa#6, #10):
 
-| Arch | `/usr/X11` from this repo | of which `libgallium-26.2.5.so` (LLVM inside) | artifact (`.tar.gz`) |
-|---|---|---|---|
-| amd64 | 96 MiB (iris and crocus: +12.3 MiB) | 89 MiB | 30 MiB |
-| arm64 | 77 MiB | 68 MiB | 23 MiB |
+| Arch | core `/usr/X11` | of which `libgallium-26.2.5.so` (LLVM inside) | core `.tar.gz` | X `/usr/X11` | X `.tar.gz` |
+|---|---|---|---|---|---|
+| amd64 | 94 MiB | 89 MiB | 30 MiB | 2.0 MiB | 0.5 MiB |
+| arm64 | 74 MiB | 68 MiB | 23 MiB | 2.6 MiB | 0.5 MiB |
+
+The two Mesa builds take a CI job about 20 minutes on amd64 (12 before the
+split) and 10 on arm64 (4).
 
 Licences are per component; see `NOTICE.md`. The top-level `LICENSE` (BSD-2)
 covers only this repo's harness. freeglut is not built: nothing calls GLUT.

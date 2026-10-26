@@ -732,7 +732,7 @@ mesa_core_checks() {
     egl_core_checks
     no_x_in_core
     for f in "libgallium-$VERSION.so" libEGL_mesa_core.so.0 gbm/dri_gbm.so dri/libdril_dri.so libEGL.so.1; do
-        note "core $f ($(du -k "$x/lib/$f" | cut -f1) KiB) NEEDED: $(needed_of "$x/lib/$f")"
+        note "core $f ($(du -kL "$x/lib/$f" | cut -f1) KiB) NEEDED: $(needed_of "$x/lib/$f")"
     done
 }
 
