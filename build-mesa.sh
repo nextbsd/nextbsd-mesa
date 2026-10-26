@@ -23,7 +23,7 @@
 # ports tree or ports tools, and nothing links against nextbsd-userland.
 #
 # EXECUTION CONTEXT (set up by CI before this runs)
-#   Inside the nextbsd-kernel-toolchain container (pinned clang/lld 19.1.7 in
+#   Inside the nextbsd-toolchain container (pinned clang/lld 19.1.7 in
 #   $CROSS_BINDIR, meson, ninja, pkgconf, bison, flex, python3 with mako and
 #   yaml), with $SYSROOT holding, in this order, compat's `continuous` base,
 #   nextbsd-displayserver-support's `continuous` artifact (libdrm, expat and

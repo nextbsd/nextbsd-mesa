@@ -1,7 +1,7 @@
 name: Build NextBSD Mesa (libglvnd, Mesa, libGLU)
 
 # Cross-builds libglvnd, Mesa and libGLU into /usr/X11 for amd64 and arm64 on
-# the x86_64 runner, inside the per-arch nextbsd-kernel-toolchain container,
+# the x86_64 runner, inside the per-arch nextbsd-toolchain container,
 # from the pinned tarballs in sources.lock. The sysroot is compat's
 # `continuous` base, then nextbsd-displayserver-support's `continuous` artifact
 # (libdrm, expat and the other shared display-server libraries in /usr), then
@@ -49,7 +49,7 @@ jobs:
       # pkgconf, bison, flex and python3 with mako, yaml and packaging
       # (nextbsd-toolchain#13). Since nextbsd-toolchain#11 it also
       # carries /opt/mesa-clc, and build-mesa.sh then adds iris and crocus.
-      image: ghcr.io/nextbsd/nextbsd-kernel-toolchain:${{ matrix.arch }}-${{ inputs.fbsd_sha && format('fbsd-{0}', inputs.fbsd_sha) || 'latest' }}
+      image: ghcr.io/nextbsd/nextbsd-toolchain:${{ matrix.arch }}-${{ inputs.fbsd_sha && format('fbsd-{0}', inputs.fbsd_sha) || 'latest' }}
     steps:
       - uses: actions/checkout@v4
 
