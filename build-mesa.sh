@@ -645,8 +645,6 @@ build_mesa() {
     meson_deps_from_usr 'libdrm(_.*)?|expat'
     stage mesa
     MESA_CORE_BUILD="$COMP_BUILD"
-    mesa_core_checks
-    if [ "$INTEL_ON" = 1 ]; then intel_checks; fi
 
     # ---- X build: the options from before the split; vendor mesa ----
     comp "Mesa X build (GLX, x11 EGL vendor) [meson cross]"
@@ -659,6 +657,19 @@ build_mesa() {
     # (libglvnd's libglxmapping.c); point it at Mesa, as FreeBSD does with
     # libmap. NVIDIA overrides it with its own libmap entry.
     ln -s libGLX_mesa.so.0 "$COMP_ROOT$X_PREFIX/lib/libGLX_indirect.so.0"
+    # libdril_dri.so and the dri/*_dri.so links (what the X server's GLX and
+    # older loaders open) go into the core artifact: upstream builds them only
+    # with GLX or the x11 platform (src/meson.build), but libdril links only
+    # libgbm and runs against the core's libgallium through it (check 2).
+    local dril="$BUILD/mesa-dril-$T" clash
+    rm -rf "$dril"
+    mkdir -p "$dril$X_PREFIX/lib"
+    mv "$COMP_ROOT$X_PREFIX/lib/dri" "$dril$X_PREFIX/lib/dri"
+    clash=$(cd "$dril" && find . ! -type d | sed 's#^\./##' | LC_ALL=C sort | LC_ALL=C comm -12 - "$BASE_LIST")
+    [ -z "$clash" ] || fail "dri/ would replace files of the sysroot inputs: $clash"
+    (cd "$dril" && tar -cf - .) | (cd "$SYSROOT" && tar -xf -)
+    (cd "$dril" && tar -cf - .) | (cd "$DESTDIR" && tar -xf -)
+    note "from the X build into the core: $(cd "$dril$X_PREFIX/lib" && find dri ! -type d | LC_ALL=C sort | tr '\n' ' ')"
     # Keep the X build's libgallium aside for the symbol checks, then drop
     # everything but the X frontends.
     MESA_X11_GALLIUM="$BUILD/mesa-x11-discarded-$T/libgallium-$VERSION.so"
@@ -667,6 +678,8 @@ build_mesa() {
     # shellcheck disable=SC2086 # word-splitting the glob list is intended
     keep_only "$COMP_ROOT" $MESA_X11_FILES
     stage mesa-x11 "$DESTDIR_X11"
+    mesa_core_checks
+    if [ "$INTEL_ON" = 1 ]; then intel_checks; fi
     mesa_x11_checks
     mesa_split_checks
     no_clc_host_files
@@ -924,18 +937,19 @@ glvnd_layout_checks() {
         "50_mesa.json (libEGL_mesa.so.0) is read first"
 }
 
-# iris and crocus (E23 D6/D7) are compiled into libgallium: their sources are
-# in the build, their shaders were compiled by the build-host mesa_clc (Mesa
-# would otherwise have built its own), and libgallium carries Intel code.
+# iris and crocus (E23 D6/D7) are compiled into the core libgallium: their
+# sources are in the build, their shaders were compiled by the build-host
+# mesa_clc (Mesa would otherwise have built its own), and libgallium carries
+# Intel code.
 intel_checks() {
-    local d
+    local d nj="$MESA_CORE_BUILD/build.ninja"
     for d in iris crocus; do
-        grep -q -F "src/gallium/drivers/$d/" "$COMP_BUILD/build.ninja" || fail "$d is not in the build"
+        grep -q -F "src/gallium/drivers/$d/" "$nj" || fail "$d is not in the build"
     done
     has_string "$DESTDIR$X_PREFIX/lib/libgallium-$VERSION.so" INTEL_DEBUG
-    grep -q -F "$BUILD/mesa-clc-host/bin/mesa_clc" "$COMP_BUILD/build.ninja" \
+    grep -q -F "$BUILD/mesa-clc-host/bin/mesa_clc" "$nj" \
         || fail "the cross build does not run the build-host mesa_clc"
-    if grep -q -E 'src/compiler/clc/mesa_clc\b|build mesa_clc:' "$COMP_BUILD/build.ninja"; then
+    if grep -q -E 'src/compiler/clc/mesa_clc\b|build mesa_clc:' "$nj"; then
         fail "the cross build compiles its own mesa_clc"
     fi
     note "iris and crocus built; Intel shaders compiled by the build-host mesa_clc"
