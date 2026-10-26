@@ -16,7 +16,17 @@
 #               installed with DESTDIR into .build/<name>-root-<arch>/;
 #   4. stage:   check and tidy that install, then copy it into $SYSROOT (so
 #               later components find its headers, .pc files and libraries)
-#               and into $DESTDIR (the published artifact).
+#               and into $DESTDIR (the core artifact) or $DESTDIR_X11 (the X
+#               artifact).
+#
+# Two artifacts (nextbsd-mesa#10, E25 audit 4 option C):
+#   $DESTDIR      the core: X-free. libglvnd's EGL, GLES, OpenGL and dispatch
+#                 libraries, Mesa's core build (libgallium, libEGL_mesa_core,
+#                 libgbm, dri_gbm, libdril and the DRI links) and libGLU;
+#   $DESTDIR_X11  Mesa's X parts: libglvnd's libGL and libGLX, and from
+#                 Mesa's X build only libGLX_mesa, libGLX_indirect, libEGL_mesa
+#                 and 50_mesa.json, which run against the core's libgallium.
+# No file is in both.
 #
 # Upstream build systems are used as they are, with NextBSD's options; nothing
 # is rewritten as a hand-made makefile. Nothing here uses FreeBSD packages, the
@@ -48,6 +58,7 @@ set -euo pipefail
 : "${CROSS_BINDIR:?set CROSS_BINDIR to the dir holding the cross clang/lld}"
 : "${LLVM_STATIC:?set LLVM_STATIC to the unpacked llvm-19-nextbsd-<arch> tree}"
 : "${DESTDIR:=/stage}"
+: "${DESTDIR_X11:=/stage-x11}"
 # Host libraries for Intel's mesa_clc (nextbsd-toolchain#11), in the toolchain
 # image. See build_mesa and README "Intel".
 : "${MESA_CLC_HOST:=/opt/mesa-clc}"
@@ -78,7 +89,16 @@ esac
 SYSROOT="$(cd "$SYSROOT" && pwd)"
 LLVM_STATIC="$(cd "$LLVM_STATIC" && pwd)"
 LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
-export SYSROOT DESTDIR CROSS_BINDIR
+export SYSROOT DESTDIR DESTDIR_X11 CROSS_BINDIR
+
+# What goes into the X artifact, relative to $X_PREFIX (globs). Everything
+# else libglvnd installs is the core's; everything else Mesa's X build
+# installs (its libgallium, libgbm, dri_gbm, DRI links, drirc.d, headers and
+# .pc files) is discarded in favour of the core build's.
+GLVND_X11_FILES="lib/libGL.so* lib/libGLX.so* include/GL/glx.h include/GL/glxext.h
+    include/glvnd/libglxabi.h lib/pkgconfig/gl.pc lib/pkgconfig/glx.pc"
+MESA_X11_FILES="lib/libGLX_mesa.so* lib/libGLX_indirect.so.0 lib/libEGL_mesa.so*
+    share/glvnd/egl_vendor.d/50_mesa.json"
 
 # pkgconf's search path inside the sysroot, in the cross files' order:
 # /usr/libdata/pkgconfig (the base and nextbsd-displayserver-support) before
@@ -90,6 +110,15 @@ PC_PATH="$SYSROOT/usr/libdata/pkgconfig:$SYSROOT$X_PREFIX/lib/pkgconfig"
 comp() { echo; echo "==> [$T/$TA] $*"; }
 note() { echo "    - $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# in_x11 <cmd>...: run a check against the X artifact ($DESTDIR_X11) instead
+# of the core one.
+in_x11() { local DESTDIR="$DESTDIR_X11"; "$@"; }
+
+# needed_of <obj>: its DT_NEEDED entries, space-separated.
+needed_of() {
+    "$CROSS_BINDIR/llvm-readelf" -d "$1" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p' | tr '\n' ' '
+}
 
 # lock_field <name> <version|sha256|url>: a component's pin from sources.lock.
 lock_field() {
@@ -252,8 +281,9 @@ base_list() {
     fi
 }
 
-# stage <name>: tidy and check $COMP_ROOT, then copy it into $SYSROOT (for the
-# components after this one) and $DESTDIR (the artifact).
+# stage <name> [dest]: tidy and check $COMP_ROOT, then copy it into $SYSROOT
+# (for the components after this one) and into [dest] (default $DESTDIR, the
+# core artifact; $DESTDIR_X11 for the X one).
 #   - everything must be under /usr/X11, and nothing may replace a file of the
 #     base, nextbsd-displayserver-support or nextbsd-xlibs;
 #   - libtool .la files and docs are dropped (man pages are kept);
@@ -262,7 +292,7 @@ base_list() {
 #   - no .pc file may name /usr/local or a build-host path, and no symlink may
 #     point outside the install.
 stage() {
-    local name="$1" x="$COMP_ROOT$X_PREFIX" stray f d clash bad
+    local name="$1" dest="${2:-$DESTDIR}" x="$COMP_ROOT$X_PREFIX" stray f d clash bad
     [ -d "$x" ] || fail "$name installed nothing under $X_PREFIX"
     stray=$(cd "$COMP_ROOT" && find . -mindepth 1 ! -path ./usr ! -path ".$X_PREFIX" ! -path ".$X_PREFIX/*")
     [ -z "$stray" ] || fail "$name installed outside $X_PREFIX: $stray"
@@ -296,8 +326,57 @@ stage() {
     clash=$(cd "$COMP_ROOT" && find . ! -type d | sed 's#^\./##' | LC_ALL=C sort | LC_ALL=C comm -12 - "$BASE_LIST")
     [ -z "$clash" ] || fail "$name would replace files of the NextBSD base, nextbsd-displayserver-support or nextbsd-xlibs: $clash"
     (cd "$COMP_ROOT" && tar -cf - .) | (cd "$SYSROOT" && tar -xf -)
-    (cd "$COMP_ROOT" && tar -cf - .) | (cd "$DESTDIR" && tar -xf -)
-    note "staged $(cd "$COMP_ROOT" && find . ! -type d | wc -l) files, $(du -sk "$COMP_ROOT" | cut -f1) KiB"
+    mkdir -p "$dest"
+    (cd "$COMP_ROOT" && tar -cf - .) | (cd "$dest" && tar -xf -)
+    note "staged $(cd "$COMP_ROOT" && find . ! -type d | wc -l) files, $(du -sk "$COMP_ROOT" | cut -f1) KiB, into $dest"
+}
+
+# to_x11 <glob>...: move staged files (relative to $X_PREFIX) from the core
+# artifact to the X artifact. Each glob must match.
+to_x11() {
+    local g f rel n
+    for g in "$@"; do
+        n=0
+        for f in "$DESTDIR$X_PREFIX"/$g; do
+            [ -e "$f" ] || [ -L "$f" ] || continue
+            rel="${f#"$DESTDIR"}"
+            mkdir -p "$(dirname "$DESTDIR_X11$rel")"
+            mv "$f" "$DESTDIR_X11$rel"
+            n=$((n + 1))
+        done
+        [ "$n" -gt 0 ] || fail "to_x11: nothing staged matches $X_PREFIX/$g"
+    done
+    find "$DESTDIR$X_PREFIX" -type d -empty -delete
+    note "moved to the X artifact: $(cd "$DESTDIR_X11$X_PREFIX" && find . ! -type d | sed 's#^\./##' | LC_ALL=C sort | tr '\n' ' ')"
+}
+
+# keep_only <root> <glob>...: delete every file under <root>$X_PREFIX that
+# matches none of the globs (relative to $X_PREFIX); each glob must match.
+# Prints what was discarded.
+keep_only() {
+    local root="$1" f rel g keep gone= hit
+    shift
+    for g in "$@"; do
+        hit=0
+        for f in "$root$X_PREFIX"/$g; do
+            if [ -e "$f" ] || [ -L "$f" ]; then hit=1; fi
+        done
+        [ "$hit" = 1 ] || fail "keep_only: the X build installed nothing matching $X_PREFIX/$g"
+    done
+    while IFS= read -r f; do
+        rel="${f#"$root$X_PREFIX/"}"
+        keep=0
+        for g in "$@"; do
+            # shellcheck disable=SC2053 # $g is a glob on purpose
+            if [[ "$rel" == $g ]]; then keep=1; break; fi
+        done
+        if [ "$keep" = 0 ]; then
+            rm -f "$f"
+            gone="$gone $rel"
+        fi
+    done < <(find "$root$X_PREFIX" ! -type d | LC_ALL=C sort)
+    find "$root$X_PREFIX" -type d -empty -delete
+    note "discarded from the X build:$gone"
 }
 
 # pc_check <module> [version]: the staged .pc resolves through pkgconf the way
@@ -376,6 +455,11 @@ llvm_check() {
 # TLS dispatch stubs (aarch64: TSD stubs). EGL vendor JSONs are searched in
 # /usr/X11/etc/glvnd/egl_vendor.d then /usr/X11/share/glvnd/egl_vendor.d.
 # No Haiku GL; the upstream test programs are built but not installed.
+#
+# One build, split between the artifacts: the GLX side (libGL, libGLX, which
+# link libX11, the GLX headers, gl.pc and glx.pc) goes into the X artifact,
+# the rest (libEGL, libGLdispatch, libOpenGL, libGLES*, the GL, EGL, GLES and
+# KHR headers) into the core one.
 build_libglvnd() {
     comp "libglvnd [meson cross]"
     fresh_dirs libglvnd
@@ -384,14 +468,17 @@ build_libglvnd() {
         -Dgles1=true -Dgles2=true -Dheaders=true -Dhgl=false \
         -Dtls=true -Ddispatch-tls=true -Dentrypoint-patching=enabled
     stage libglvnd
+    # shellcheck disable=SC2086 # word-splitting the glob list is intended
+    to_x11 $GLVND_X11_FILES
     local x="$DESTDIR$X_PREFIX"
     test -f "$x/include/GL/gl.h" || fail "GL/gl.h not staged"
     test -f "$x/include/EGL/egl.h" || fail "EGL/egl.h not staged"
     test -f "$x/include/KHR/khrplatform.h" || fail "KHR/khrplatform.h not staged"
-    so_check libGLdispatch.so.0 libGL.so.1 libGLX.so.0 libOpenGL.so.0 libEGL.so.1 \
-             libGLESv1_CM.so.1 libGLESv2.so.2
-    lib_needs libGL.so.1 libGLdispatch.so.0 libGLX.so.0
-    lib_needs libGLX.so.0 libGLdispatch.so.0 libX11.so.6
+    test -f "$DESTDIR_X11$X_PREFIX/include/GL/glx.h" || fail "GL/glx.h not in the X artifact"
+    so_check libGLdispatch.so.0 libOpenGL.so.0 libEGL.so.1 libGLESv1_CM.so.1 libGLESv2.so.2
+    in_x11 so_check libGL.so.1 libGLX.so.0
+    in_x11 lib_needs libGL.so.1 libGLdispatch.so.0 libGLX.so.0
+    in_x11 lib_needs libGLX.so.0 libGLdispatch.so.0 libX11.so.6
     has_string "$x/lib/libEGL.so.1" "$X_PREFIX/etc/glvnd/egl_vendor.d:$X_PREFIX/share/glvnd/egl_vendor.d"
     pc_check libglvnd "$VERSION"
     pc_check gl
@@ -462,12 +549,30 @@ EOF
     note "mesa_clc and vtn_bindgen2 built from $MESA_CLC_HOST ($("$MESA_CLC_HOST/bin/llvm-config" --version))"
 }
 
-# Mesa — OpenGL, GLX, EGL and GBM, and the Gallium DRI drivers (E23 D5-D8,
-# D15). meson. As a GLVND vendor: libGLX_mesa.so.0, libEGL_mesa.so.0 +
-# 50_mesa.json; plus libgbm.so.1 with dri_gbm.so, libgallium-<version>.so and
-# the dri/*_dri.so links to libdril_dri.so (the X server's GLX loads them).
+# Mesa — OpenGL, EGL and GBM, GLX, and the Gallium DRI drivers (E23 D5-D8,
+# D15). meson. Built twice from the same patched tree (nextbsd-mesa#10, E25
+# audit 4 option C), sharing one X-free libgallium:
 #
-# Drivers (E23 D6):
+#   core  -Dplatforms= -Dglx=disabled, GLVND vendor `mesa_core`. Ships
+#         libgallium-<version>.so, libEGL_mesa_core.so.0 + 50_mesa_core.json,
+#         libgbm.so.1 + gbm/dri_gbm.so, dri/libdril_dri.so and the
+#         dri/*_dri.so links (the X server's GLX loads them), drirc.d, gbm.h,
+#         dri.pc and gbm.pc. Nothing in it links an X library. EGL has the
+#         drm (GBM), surfaceless and device platforms.
+#   X     the options this repo always used (-Dplatforms=x11 -Dglx=dri,
+#         vendor `mesa`). Only libGLX_mesa.so.0 (+ libGLX_indirect.so.0),
+#         libEGL_mesa.so.0 and 50_mesa.json are kept, for the X artifact;
+#         its libgallium, libgbm, dri_gbm and the rest are discarded. They
+#         run against the core's libgallium: patches/mesa 0010 builds the
+#         DRI3 helper into these frontends instead of into libgallium, so the
+#         two builds' libgallium export the same symbols (checked).
+#
+# GLVND: libglvnd reads the vendor JSONs in strcmp order (libeglvendor.c), so
+# with both artifacts installed 50_mesa.json sorts before 50_mesa_core.json
+# and the X vendor answers first, as before the split; with the core alone,
+# 50_mesa_core.json is the only Mesa vendor.
+#
+# Drivers (E23 D6), the same in both builds:
 #   amd64  iris, crocus (their shaders compiled by the build-host mesa_clc,
 #          host_mesa_clc), radeonsi (ACO only, -Damd-use-llvm=false), r600,
 #          virgl, llvmpipe, softpipe
@@ -500,7 +605,7 @@ build_mesa() {
         pc_from_usr libdrm_amdgpu libdrm_radeon
     fi
     host_mesa_clc
-    local drivers clc=()
+    local drivers clc=() common
     case "$T" in
         amd64) drivers=radeonsi,r600,virgl,llvmpipe,softpipe ;;
         arm64) drivers=v3d,vc4,virgl,llvmpipe,softpipe ;;
@@ -510,42 +615,74 @@ build_mesa() {
         clc=(--native-file "$CLC_NATIVE" -Dmesa-clc=system)
     fi
     note "gallium drivers: $drivers"
+    # Options both builds share.
     # -Db_lundef=false: meson's default --no-undefined can't hold for
     # libgallium with LLVM linked in statically. LLVMSupport's Program.cpp
     # uses `environ`, which NextBSD (like FreeBSD) defines in crt1.o, i.e. in
     # the executable, not in libc.so; it resolves when a program loads
     # libgallium. (A shared libLLVM, as FreeBSD ports use, is linked without
     # --no-undefined for the same reason.)
-    meson_build "${clc[@]}" -Db_lundef=false \
-        -Dplatforms=x11 -Dglx=dri -Degl=enabled -Dgbm=enabled -Dglvnd=enabled \
-        -Dgallium-drivers="$drivers" -Dvulkan-drivers= \
-        -Dllvm=enabled -Dshared-llvm=disabled -Ddraw-use-llvm=true -Damd-use-llvm=false \
-        -Dopengl=true -Dgles1=disabled -Dgles2=enabled -Dglx-direct=true \
-        -Ddri-drivers-path="$X_PREFIX/lib/dri" -Dgbm-backends-path="$X_PREFIX/lib/gbm" \
-        -Dxlib-lease=disabled -Dgallium-va=disabled -Dgallium-rusticl=false \
-        -Dmicrosoft-clc=disabled -Dvalgrind=disabled -Dlibunwind=disabled \
-        -Dlmsensors=disabled -Dzstd=disabled -Dzlib=enabled -Dexpat=enabled \
-        -Dxmlconfig=enabled -Ddisplay-info=disabled -Dvideo-codecs= \
-        -Dtools= -Dbuild-tests=false -Dhtml-docs=disabled
+    common=("${clc[@]}" -Db_lundef=false
+        -Degl=enabled -Dgbm=enabled -Dglvnd=enabled
+        -Dgallium-drivers="$drivers" -Dvulkan-drivers=
+        -Dllvm=enabled -Dshared-llvm=disabled -Ddraw-use-llvm=true -Damd-use-llvm=false
+        -Dopengl=true -Dgles1=disabled -Dgles2=enabled
+        -Ddri-drivers-path="$X_PREFIX/lib/dri" -Dgbm-backends-path="$X_PREFIX/lib/gbm"
+        -Dxlib-lease=disabled -Dgallium-va=disabled -Dgallium-rusticl=false
+        -Dmicrosoft-clc=disabled -Dvalgrind=disabled -Dlibunwind=disabled
+        -Dlmsensors=disabled -Dzstd=disabled -Dzlib=enabled -Dexpat=enabled
+        -Dxmlconfig=enabled -Ddisplay-info=disabled -Dvideo-codecs=
+        -Dtools= -Dbuild-tests=false -Dhtml-docs=disabled)
+
+    # ---- core build: no X platform, no GLX; vendor mesa_core ----
+    comp "Mesa core build (no X) [meson cross]"
+    meson_build "${common[@]}" \
+        -Dplatforms= -Dglx=disabled -Dglvnd-vendor-name=mesa_core
     # libdrm (and libdrm_amdgpu/libdrm_radeon on amd64) and expat are
     # nextbsd-displayserver-support's in /usr, not nextbsd-xlibs' /usr/X11
     # copies (E25 plan, migration step 2). Same versions and sonames, so the
     # result runs the same against either.
     meson_deps_from_usr 'libdrm(_.*)?|expat'
+    stage mesa
+    MESA_CORE_BUILD="$COMP_BUILD"
+    mesa_core_checks
+    if [ "$INTEL_ON" = 1 ]; then intel_checks; fi
+
+    # ---- X build: the options from before the split; vendor mesa ----
+    comp "Mesa X build (GLX, x11 EGL vendor) [meson cross]"
+    fresh_dirs mesa-x11
+    meson_build "${common[@]}" \
+        -Dplatforms=x11 -Dglx=dri -Dglx-direct=true
+    meson_deps_from_usr 'libdrm(_.*)?|expat'
+    MESA_X11_BUILD="$COMP_BUILD"
     # GLX falls back to the "indirect" vendor when the server names none
     # (libglvnd's libglxmapping.c); point it at Mesa, as FreeBSD does with
     # libmap. NVIDIA overrides it with its own libmap entry.
     ln -s libGLX_mesa.so.0 "$COMP_ROOT$X_PREFIX/lib/libGLX_indirect.so.0"
-    stage mesa
-    local x="$DESTDIR$X_PREFIX" d gallium
+    # Keep the X build's libgallium aside for the symbol checks, then drop
+    # everything but the X frontends.
+    MESA_X11_GALLIUM="$BUILD/mesa-x11-discarded-$T/libgallium-$VERSION.so"
+    mkdir -p "$(dirname "$MESA_X11_GALLIUM")"
+    cp "$COMP_ROOT$X_PREFIX/lib/libgallium-$VERSION.so" "$MESA_X11_GALLIUM"
+    # shellcheck disable=SC2086 # word-splitting the glob list is intended
+    keep_only "$COMP_ROOT" $MESA_X11_FILES
+    stage mesa-x11 "$DESTDIR_X11"
+    mesa_x11_checks
+    mesa_split_checks
+    no_clc_host_files
+}
+
+# The core build's install, in $DESTDIR.
+mesa_core_checks() {
+    local x="$DESTDIR$X_PREFIX" d f gallium
     gallium="$x/lib/libgallium-$VERSION.so"
-    so_check libGLX_mesa.so.0 libEGL_mesa.so.0 libgbm.so.1
+    so_check libEGL_mesa_core.so.0 libgbm.so.1
     soname_check "$gallium" "libgallium-$VERSION.so"
-    [ "$(readlink "$x/lib/libGLX_indirect.so.0")" = libGLX_mesa.so.0 ] || fail "libGLX_indirect.so.0 link wrong"
-    test -f "$x/share/glvnd/egl_vendor.d/50_mesa.json" || fail "50_mesa.json not staged"
-    grep -q libEGL_mesa.so.0 "$x/share/glvnd/egl_vendor.d/50_mesa.json" || fail "50_mesa.json does not name libEGL_mesa.so.0"
     test -f "$x/lib/gbm/dri_gbm.so" || fail "gbm/dri_gbm.so not staged"
     test -f "$x/include/gbm.h" || fail "gbm.h not staged"
+    for f in libGLX_mesa.so.0 libEGL_mesa.so.0 libGLX_indirect.so.0; do
+        [ ! -e "$x/lib/$f" ] || fail "the core build installed $f"
+    done
     # The DRI drivers: links to libdril_dri.so (the shim the server's GLX and
     # older loaders open), one per driver, plus swrast and kms_swrast.
     local want="swrast kms_swrast virtio_gpu"
@@ -553,7 +690,7 @@ build_mesa() {
         amd64) want="$want radeonsi r600" ;;
         arm64) want="$want v3d vc4" ;;
     esac
-    [ "$INTEL_ON" = 1 ] && want="$want iris crocus"
+    if [ "$INTEL_ON" = 1 ]; then want="$want iris crocus"; fi
     for d in $want; do
         [ -e "$x/lib/dri/${d}_dri.so" ] || fail "dri/${d}_dri.so not staged"
     done
@@ -570,22 +707,221 @@ build_mesa() {
     not_needed "$gallium" 'libLLVM|libclang|libSPIRV|libwayland|libudev|libzstd'
     not_needed "$x/lib/libgbm.so.1" 'libLLVM|libgallium|libwayland'
     lib_needs libgbm.so.1 libdrm.so.2
-    lib_needs libGLX_mesa.so.0 libX11.so.6 libxcb-dri3.so.0
     case "$T" in
         amd64) needed_check "$gallium" libdrm_amdgpu.so.1 ;;
     esac
     needed_check "$gallium" libexpat.so.1
-    note "libgallium-$VERSION.so: $(du -k "$gallium" | cut -f1) KiB, NEEDED:" \
-        "$("$CROSS_BINDIR/llvm-readelf" -d "$gallium" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p' | tr '\n' ' ')"
     pc_check dri "$VERSION"
     [ "$(PKG_CONFIG_LIBDIR="$SYSROOT$X_PREFIX/lib/pkgconfig" pkgconf --variable=dridriverdir dri)" = "$X_PREFIX/lib/dri" ] \
         || fail "dri.pc dridriverdir is not $X_PREFIX/lib/dri"
     note "dri.pc: dridriverdir=$X_PREFIX/lib/dri"
     pc_check gbm "$VERSION"
-    egl_platform_checks
-    [ "$INTEL_ON" = 1 ] && intel_checks
-    needed_closure
-    no_clc_host_files
+    egl_core_checks
+    no_x_in_core
+    for f in "libgallium-$VERSION.so" libEGL_mesa_core.so.0 gbm/dri_gbm.so dri/libdril_dri.so libEGL.so.1; do
+        note "core $f ($(du -k "$x/lib/$f" | cut -f1) KiB) NEEDED: $(needed_of "$x/lib/$f")"
+    done
+}
+
+# EGL platforms (E25 D8, audit 2 R1, audit 4). The core build has no platform
+# option at all: Mesa's meson adds `surfaceless` whenever EGL is built and
+# `drm` (the GBM platform) whenever GBM is too, so -Degl=enabled
+# -Dgbm=enabled provide EGL on GBM, with EGL_KHR_platform_gbm /
+# EGL_MESA_platform_gbm, EGL_MESA_platform_surfaceless and
+# EGL_EXT_platform_device, and no x11 platform. libglvnd's libEGL.so.1 (what
+# an EGL-only client such as the WindowServer links) needs nothing from X.
+egl_core_checks() {
+    local x="$DESTDIR$X_PREFIX" p f nj="$MESA_CORE_BUILD/build.ninja"
+    for p in DRM SURFACELESS; do
+        grep -q -F -- "-DHAVE_${p}_PLATFORM" "$nj" \
+            || fail "core Mesa configured without the ${p,,} EGL platform (no -DHAVE_${p}_PLATFORM)"
+    done
+    for p in X11 XCB; do
+        if grep -q -F -- "-DHAVE_${p}_PLATFORM" "$nj"; then
+            fail "core Mesa configured with the ${p,,} platform"
+        fi
+    done
+    for f in platform_drm.c platform_surfaceless.c platform_device.c; do
+        grep -q -F "src/egl/drivers/dri2/$f" "$nj" || fail "core EGL $f not built"
+    done
+    for f in platform_x11.c platform_x11_dri3.c loader_dri3_helper.c; do
+        if grep -q -F "/$f" "$nj"; then fail "core build compiles $f"; fi
+    done
+    note "core EGL platforms built: drm (GBM), surfaceless, device; no x11, no xcb"
+    for p in EGL_KHR_platform_gbm EGL_MESA_platform_gbm EGL_MESA_platform_surfaceless EGL_EXT_platform_device; do
+        has_string "$x/lib/libEGL_mesa_core.so.0" "$p"
+    done
+    lib_needs libEGL_mesa_core.so.0 libgbm.so.1 libdrm.so.2 "libgallium-$VERSION.so"
+    not_needed "$x/lib/libEGL.so.1" 'libX11|libxcb'
+}
+
+# CI check 2 (nextbsd-mesa#10, audit 4 §2 C): libgallium, libEGL_mesa_core,
+# dri_gbm.so and libdril link no X library, and libgallium has no undefined
+# xcb, xshmfence or DRI3-helper symbol left for lazy binding to trip over.
+no_x_in_core() {
+    local x="$DESTDIR$X_PREFIX" f und
+    echo "    [check 2] no libX11/libxcb/libxshmfence in the core's Mesa libraries"
+    for f in "libgallium-$VERSION.so" libEGL_mesa_core.so.0 gbm/dri_gbm.so dri/libdril_dri.so; do
+        not_needed "$x/lib/$f" 'libX11|libxcb|libxshmfence'
+    done
+    und=$("$CROSS_BINDIR/llvm-readelf" --dyn-syms --wide "$x/lib/libgallium-$VERSION.so" \
+        | awk '$NF ~ /^\([0-9]+\)$/ { NF-- } NF >= 8 && $(NF-1) == "UND" { print $NF }' | grep -E '^(xcb_|xshmfence_|loader_dri3_)' || true)
+    [ -z "$und" ] || fail "core libgallium still references $(echo $und)"
+    note "core libgallium: no undefined xcb_*, xshmfence_* or loader_dri3_* symbols"
+}
+
+# The X build's kept install, in $DESTDIR_X11.
+mesa_x11_checks() {
+    local x="$DESTDIR_X11$X_PREFIX" p f nj="$MESA_X11_BUILD/build.ninja"
+    in_x11 so_check libGLX_mesa.so.0 libEGL_mesa.so.0
+    [ "$(readlink "$x/lib/libGLX_indirect.so.0")" = libGLX_mesa.so.0 ] || fail "libGLX_indirect.so.0 link wrong"
+    for p in DRM SURFACELESS X11 XCB; do
+        grep -q -F -- "-DHAVE_${p}_PLATFORM" "$nj" \
+            || fail "X Mesa configured without the ${p,,} EGL platform (no -DHAVE_${p}_PLATFORM)"
+    done
+    for f in platform_drm.c platform_surfaceless.c platform_device.c platform_x11.c; do
+        grep -q -F "src/egl/drivers/dri2/$f" "$nj" || fail "X EGL $f not built"
+    done
+    note "X EGL platforms built: drm (GBM), surfaceless, device, x11, xcb"
+    for p in EGL_KHR_platform_gbm EGL_MESA_platform_gbm EGL_MESA_platform_surfaceless EGL_EXT_platform_device; do
+        has_string "$x/lib/libEGL_mesa.so.0" "$p"
+    done
+    in_x11 lib_needs libEGL_mesa.so.0 libgbm.so.1 libdrm.so.2 "libgallium-$VERSION.so"
+    in_x11 lib_needs libGLX_mesa.so.0 libX11.so.6 libxcb-dri3.so.0 "libgallium-$VERSION.so"
+    for f in libEGL_mesa.so.0 libGLX_mesa.so.0 libGLX.so.0 libGL.so.1; do
+        note "x11 $f NEEDED: $(needed_of "$x/lib/$f")"
+    done
+}
+
+# The checks that make one libgallium safe for both builds (nextbsd-mesa#10,
+# audit 4 §2 C, checks 3-5), and the GLVND vendor layout.
+mesa_split_checks() {
+    local core_g="$DESTDIR$X_PREFIX/lib/libgallium-$VERSION.so" nj
+    echo "    [checks 3, 4] X frontends against the core libgallium"
+    python3 -I - "$CROSS_BINDIR/llvm-readelf" "$core_g" "$MESA_X11_GALLIUM" \
+        "$SYSROOT" "$X_PREFIX" "$DESTDIR$X_PREFIX/lib" "$DESTDIR_X11$X_PREFIX/lib" \
+        "$DESTDIR_X11$X_PREFIX/lib/libGLX_mesa.so.0" "$DESTDIR_X11$X_PREFIX/lib/libEGL_mesa.so.0" <<'PY' \
+        || fail "the X frontends do not fit the core libgallium"
+import os, re, subprocess, sys
+readelf, core_g, x_g, sysroot, xp, core_lib, x11_lib, *fronts = sys.argv[1:]
+
+def run(*a):
+    return subprocess.run([readelf, *a], check=True, capture_output=True, text=True).stdout
+
+def dynsyms(path):
+    """(defined, undefined non-weak) dynamic symbol names, versions kept."""
+    d, u = set(), set()
+    for line in run("--dyn-syms", "--wide", path).splitlines():
+        f = line.split()
+        if f and re.fullmatch(r"\(\d+\)", f[-1]):
+            f = f[:-1]  # "name@VER (2)": drop the version index
+        if len(f) < 8 or not f[0].rstrip(":").isdigit():
+            continue
+        bind, ndx, name = f[4], f[-2], f[-1]
+        if bind == "LOCAL":
+            continue
+        if ndx == "UND":
+            if bind != "WEAK":
+                u.add(name.split("@")[0])
+        else:
+            d.add(name)
+    return d, u
+
+def needed(path):
+    return [l.split("[", 1)[1].rstrip("]") for l in run("-d", path).splitlines() if "(NEEDED)" in l]
+
+def find(soname):
+    if soname.startswith("libgallium-"):
+        return core_g  # the shipped one, never the X build's
+    for d in (core_lib, x11_lib, sysroot + "/lib", sysroot + "/usr/lib", sysroot + xp + "/lib"):
+        p = os.path.join(d, soname)
+        if os.path.exists(p):
+            return p
+    return None
+
+bare = lambda names: {n.split("@")[0] for n in names}
+core_exp, _ = dynsyms(core_g)
+x_exp, _ = dynsyms(x_g)
+bad = 0
+
+# Check 4: the discarded X-build libgallium exports exactly what the core's does.
+if core_exp != x_exp:
+    print("FAIL [check 4]: core and X-build libgallium export different symbols", file=sys.stderr)
+    for n in sorted(core_exp - x_exp): print("    only core: " + n, file=sys.stderr)
+    for n in sorted(x_exp - core_exp): print("    only X:    " + n, file=sys.stderr)
+    bad = 1
+else:
+    print("    - [check 4] X-build libgallium exports exactly the core's %d symbols" % len(core_exp))
+
+# Check 3: every undefined symbol of the X frontends that libgallium provides
+# is exported by the core libgallium, and every other one by a library in
+# the frontend's DT_NEEDED closure (core, X artifact, sysroot inputs).
+core_bare, x_bare = bare(core_exp), bare(x_exp)
+crt = {"environ", "__progname"}  # defined in crt1.o, by the executable
+for fr in fronts:
+    name = os.path.basename(fr)
+    _, und = dynsyms(fr)
+    helper = sorted(s for s in und if s.startswith("loader_dri3_"))
+    if helper:
+        print("FAIL [check 3]: %s still imports %s (patch 0010 not effective)" % (name, " ".join(helper)), file=sys.stderr)
+        bad = 1
+    from_g = und & (x_bare | core_bare)
+    missing = sorted(from_g - core_bare)
+    if missing:
+        print("FAIL [check 3]: %s needs from libgallium, but the core's lacks: %s" % (name, " ".join(missing)), file=sys.stderr)
+        bad = 1
+    provided, seen, todo = set(), set(), list(needed(fr))
+    while todo:
+        so = todo.pop()
+        if so in seen:
+            continue
+        seen.add(so)
+        p = find(so)
+        if p is None:
+            print("FAIL [check 3]: %s: DT_NEEDED %s not found" % (name, so), file=sys.stderr)
+            bad = 1
+            continue
+        dd, _ = dynsyms(p)
+        provided |= bare(dd)
+        todo += needed(p)
+    unresolved = sorted(und - provided - crt)
+    if unresolved:
+        print("FAIL [check 3]: %s: undefined and in no DT_NEEDED library: %s" % (name, " ".join(unresolved)), file=sys.stderr)
+        bad = 1
+    print("    - [check 3] %s: %d undefined symbols, %d from libgallium (all exported by the core's), "
+          "%d unresolved; loader_dri3_* imports: %d" % (name, len(und), len(from_g), len(unresolved), len(helper)))
+sys.exit(bad)
+PY
+    # Check 5: zink's Vulkan WSI defines VK_USE_PLATFORM_XCB_KHR, which changes
+    # struct dri_drawable (dri_drawable.h) between an X and an X-free build, and
+    # kopper.c calls the DRI3 helper from inside libgallium. Until that is
+    # handled (audit 4 §1.4, nextbsd-mesa#2), neither build may define it.
+    echo "    [check 5] VK_USE_PLATFORM_XCB_KHR"
+    for nj in "$MESA_CORE_BUILD/build.ninja" "$MESA_X11_BUILD/build.ninja"; do
+        if grep -q -F -- '-DVK_USE_PLATFORM_XCB_KHR' "$nj"; then
+            fail "VK_USE_PLATFORM_XCB_KHR is defined in $(basename "$(dirname "$nj")") (zink): one libgallium no longer fits both builds"
+        fi
+    done
+    note "VK_USE_PLATFORM_XCB_KHR is defined in neither build"
+    glvnd_layout_checks
+}
+
+# GLVND vendors: with the core alone, libglvnd's libEGL.so.1 finds exactly
+# one Mesa vendor, 50_mesa_core.json -> libEGL_mesa_core.so.0 (EGL on GBM,
+# surfaceless and device). The X artifact adds 50_mesa.json ->
+# libEGL_mesa.so.0, which libglvnd's strcmp-sorted scan (LC_ALL=C sort here)
+# puts first, so with both the X vendor answers first, as before the split.
+glvnd_layout_checks() {
+    local cd="$DESTDIR$X_PREFIX/share/glvnd/egl_vendor.d" xd="$DESTDIR_X11$X_PREFIX/share/glvnd/egl_vendor.d" first
+    [ "$(ls "$cd")" = 50_mesa_core.json ] || fail "core egl_vendor.d is not just 50_mesa_core.json: $(ls "$cd" | tr '\n' ' ')"
+    grep -q '"libEGL_mesa_core.so.0"' "$cd/50_mesa_core.json" || fail "50_mesa_core.json does not name libEGL_mesa_core.so.0"
+    [ "$(ls "$xd")" = 50_mesa.json ] || fail "X egl_vendor.d is not just 50_mesa.json: $(ls "$xd" | tr '\n' ' ')"
+    grep -q '"libEGL_mesa.so.0"' "$xd/50_mesa.json" || fail "50_mesa.json does not name libEGL_mesa.so.0"
+    [ -e "$DESTDIR$X_PREFIX/lib/libEGL.so.1" ] || fail "libglvnd's libEGL.so.1 is not in the core"
+    first=$(printf '%s\n' 50_mesa_core.json 50_mesa.json | LC_ALL=C sort | head -n 1)
+    [ "$first" = 50_mesa.json ] || fail "50_mesa.json does not sort before 50_mesa_core.json"
+    note "GLVND: core alone -> 50_mesa_core.json (libEGL_mesa_core.so.0); with the X artifact" \
+        "50_mesa.json (libEGL_mesa.so.0) is read first"
 }
 
 # iris and crocus (E23 D6/D7) are compiled into libgallium: their sources are
@@ -605,70 +941,52 @@ intel_checks() {
     note "iris and crocus built; Intel shaders compiled by the build-host mesa_clc"
 }
 
-# Every DT_NEEDED of every ELF object this repo installs resolves to the base,
-# nextbsd-displayserver-support or nextbsd-xlibs (a file listed in $BASE_LIST
-# under /lib, /usr/lib or /usr/X11/lib), or to a library this repo installs.
+# needed_closure <label> <with_xlibs: 0|1> <artifact>...: every DT_NEEDED of
+# every ELF object in the first <artifact> resolves to a library in one of the
+# <artifact>s' $X_PREFIX/lib, or to the sysroot inputs (a file listed in
+# $BASE_LIST under /lib or /usr/lib: the base and
+# nextbsd-displayserver-support; with <with_xlibs> 1 also /usr/X11/lib:
+# nextbsd-xlibs).
 needed_closure() {
-    local x="$DESTDIR$X_PREFIX" f n bad=0 all=
-    for f in $(find "$x" -type f \( -name '*.so' -o -name '*.so.*' \)); do
+    local label="$1" withx="$2" own="$3" f n d ok bad=0 all=
+    shift 2
+    for f in $(find "$own$X_PREFIX" -type f \( -name '*.so' -o -name '*.so.*' \)); do
         for n in $("$CROSS_BINDIR/llvm-readelf" -d "$f" 2>/dev/null | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p'); do
-            if [ -e "$x/lib/$n" ]; then
-                :
-            elif grep -q -x -e "lib/$n" -e "usr/lib/$n" -e "usr/X11/lib/$n" "$BASE_LIST"; then
-                :
-            else
-                echo "FAIL: ${f#"$DESTDIR"} needs $n, which is in neither the sysroot inputs nor this repo" >&2
+            ok=0
+            for d in "$@"; do
+                if [ -e "$d$X_PREFIX/lib/$n" ]; then ok=1; break; fi
+            done
+            if [ "$ok" = 0 ] && grep -q -x -e "lib/$n" -e "usr/lib/$n" "$BASE_LIST"; then
+                ok=1
+            fi
+            if [ "$ok" = 0 ] && [ "$withx" = 1 ] && grep -q -x "usr/X11/lib/$n" "$BASE_LIST"; then
+                ok=1
+            fi
+            if [ "$ok" = 0 ]; then
+                echo "FAIL: [$label] ${f#"$own"} needs $n, which is not in the allowed inputs" >&2
                 bad=1
             fi
             all="$all $n"
         done
     done
-    [ "$bad" = 0 ] || fail "unresolved DT_NEEDED entries"
-    note "every DT_NEEDED resolves to base, displayserver-support, xlibs or this repo:" \
-        "$(printf '%s\n' $all | LC_ALL=C sort -u | tr '\n' ' ')"
+    [ "$bad" = 0 ] || fail "[$label] unresolved DT_NEEDED entries"
+    note "[$label] every DT_NEEDED resolves:" "$(printf '%s\n' $all | LC_ALL=C sort -u | tr '\n' ' ')"
 }
 
-# Nothing of the build-host mesa_clc toolchain ships: no mesa_clc or
-# vtn_bindgen2, no LLVM, clang or SPIR-V library, no $MESA_CLC_HOST or
-# build-host tool path compiled in.
+# Nothing of the build-host mesa_clc toolchain ships in either artifact: no
+# mesa_clc or vtn_bindgen2, no LLVM, clang or SPIR-V library, no
+# $MESA_CLC_HOST or build-host tool path compiled in.
 no_clc_host_files() {
-    local bad
-    bad=$(cd "$DESTDIR" && find . \( -name 'mesa_clc*' -o -name 'vtn_bindgen*' -o -name 'libLLVM*' \
-        -o -name 'libclang*' -o -name '*SPIRV*' -o -name '*spirv-tools*' \) -print)
-    [ -z "$bad" ] || fail "build-host mesa_clc files staged: $bad"
-    bad=$(grep -r -l -a -F -e "$MESA_CLC_HOST" -e "$BUILD/mesa-clc-host" "$DESTDIR" || true)
-    [ -z "$bad" ] || fail "staged files name the build-host mesa_clc toolchain: $bad"
+    local bad dest
+    for dest in "$DESTDIR" "$DESTDIR_X11"; do
+        [ -d "$dest" ] || continue
+        bad=$(cd "$dest" && find . \( -name 'mesa_clc*' -o -name 'vtn_bindgen*' -o -name 'libLLVM*' \
+            -o -name 'libclang*' -o -name '*SPIRV*' -o -name '*spirv-tools*' \) -print)
+        [ -z "$bad" ] || fail "build-host mesa_clc files staged in $dest: $bad"
+        bad=$(grep -r -l -a -F -e "$MESA_CLC_HOST" -e "$BUILD/mesa-clc-host" "$dest" || true)
+        [ -z "$bad" ] || fail "staged files name the build-host mesa_clc toolchain: $bad"
+    done
     note "nothing from the build-host mesa_clc toolchain ($MESA_CLC_HOST) is staged"
-}
-
-# EGL platforms (E25 D8, audit 2 R1). -Dplatforms=x11 is the only platform
-# option given, and none is added for the WindowServer: Mesa's meson adds
-# `surfaceless` whenever EGL is built and `drm` (the GBM platform) whenever GBM
-# is too, so -Degl=enabled -Dgbm=enabled already provide EGL on GBM, with
-# EGL_KHR_platform_gbm/EGL_MESA_platform_gbm, EGL_MESA_platform_surfaceless and
-# EGL_EXT_platform_device. Check that they are built, and that libglvnd's
-# libEGL.so.1 (what an EGL-only client such as the WindowServer links) needs
-# nothing from X; only Mesa's vendor library libEGL_mesa.so.0 links the X
-# client libraries, and it connects to no X server unless asked for the x11
-# platform.
-egl_platform_checks() {
-    local x="$DESTDIR$X_PREFIX" p f
-    for p in DRM SURFACELESS X11 XCB; do
-        grep -q -F -- "-DHAVE_${p}_PLATFORM" "$COMP_BUILD/build.ninja" \
-            || fail "Mesa configured without the ${p,,} EGL platform (no -DHAVE_${p}_PLATFORM)"
-    done
-    for f in platform_drm.c platform_surfaceless.c platform_device.c platform_x11.c; do
-        grep -q -F "src/egl/drivers/dri2/$f" "$COMP_BUILD/build.ninja" || fail "EGL $f not built"
-    done
-    note "EGL platforms built: drm (GBM), surfaceless, device, x11, xcb"
-    for p in EGL_KHR_platform_gbm EGL_MESA_platform_gbm EGL_MESA_platform_surfaceless EGL_EXT_platform_device; do
-        has_string "$x/lib/libEGL_mesa.so.0" "$p"
-    done
-    lib_needs libEGL_mesa.so.0 libgbm.so.1 libdrm.so.2
-    not_needed "$x/lib/libEGL.so.1" 'libX11|libxcb'
-    for f in libEGL.so.1 libEGL_mesa.so.0 gbm/dri_gbm.so; do
-        note "$f NEEDED: $("$CROSS_BINDIR/llvm-readelf" -d "$x/lib/$f" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p' | tr '\n' ' ')"
-    done
 }
 
 # libGLU — the OpenGL utility library (mesa/glu). Gershwin's ItemFlow and
@@ -710,15 +1028,33 @@ if [ $# -gt 0 ]; then
     COMPONENTS="$*"
 fi
 
-echo "nextbsd-mesa: building [$(echo $COMPONENTS)] for $T/$TA into $DESTDIR$X_PREFIX"
-mkdir -p "$DESTDIR"
+echo "nextbsd-mesa: building [$(echo $COMPONENTS)] for $T/$TA into $DESTDIR$X_PREFIX (core) and $DESTDIR_X11$X_PREFIX (X)"
+mkdir -p "$DESTDIR" "$DESTDIR_X11"
 base_list
 for c in $COMPONENTS; do
     "build_$(printf '%s' "$c" | tr - _)"
 done
 
+# Both artifacts, as published (nextbsd-mesa#10).
+comp "artifact checks"
+# Check 1: the core resolves with the base and nextbsd-displayserver-support
+# alone, without nextbsd-xlibs (or the X artifact).
+echo "    [check 1] core DT_NEEDED closure without nextbsd-xlibs"
+needed_closure core 0 "$DESTDIR"
+if [ -n "$(find "$DESTDIR_X11" ! -type d -print -quit)" ]; then
+    needed_closure x11 1 "$DESTDIR_X11" "$DESTDIR"
+    # No path is in both artifacts (each is one package, nextbsd-pkg#34).
+    overlap=$(LC_ALL=C comm -12 <(cd "$DESTDIR" && find . ! -type d | LC_ALL=C sort) \
+                                <(cd "$DESTDIR_X11" && find . ! -type d | LC_ALL=C sort))
+    [ -z "$overlap" ] || fail "paths in both the core and the X artifact: $(echo $overlap)"
+    note "no path is in both artifacts"
+fi
+
+for d in "$DESTDIR" "$DESTDIR_X11"; do
+    echo
+    echo "==> staged into $d:"
+    ( cd "$d" && find . ! -type d | LC_ALL=C sort | sed 's#^\.##' )
+done
 echo
-echo "==> staged into $DESTDIR:"
-( cd "$DESTDIR" && find . ! -type d | sort | sed 's#^\.##' )
-echo
-echo "==> installed size: $(du -sk "$DESTDIR$X_PREFIX" | cut -f1) KiB in $DESTDIR$X_PREFIX"
+echo "==> installed size: core $(du -sk "$DESTDIR$X_PREFIX" | cut -f1) KiB in $DESTDIR$X_PREFIX," \
+    "X $( [ -d "$DESTDIR_X11$X_PREFIX" ] && du -sk "$DESTDIR_X11$X_PREFIX" | cut -f1 || echo 0) KiB in $DESTDIR_X11$X_PREFIX"

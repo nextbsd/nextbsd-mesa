@@ -17,6 +17,10 @@
 # Build fix, NextBSD's own: dri_gbm needs the xcb headers when the X11
 # platform is built, which only showed once libdrm moved to /usr (E25).
 0009-gbm-dri-xcb-headers.patch
+# NextBSD's own: the DRI3 helper goes into the X frontends instead of
+# libgallium, so one X-free libgallium serves the core and the X build
+# (nextbsd-mesa#10, E25 audit 4 option C).
+0010-dri3-helper-out-of-libgallium.patch
 #
 # Not carried from nextbsd-ports graphics/mesa-dri/files (E23 D11):
 #   patch-meson.build's POWER8 hunk, patch-src_gallium_drivers_llvmpipe_lp__rast__tri.c

@@ -1,0 +1,105 @@
+Description: build loader_dri3_helper.c into the X frontends, not libgallium
+ loader_dri3_helper.c is the DRI3/Present swap code that GLX (dri3_glx.c)
+ and the x11 EGL platform (platform_x11_dri3.c) call. Since upstream commit
+ 8cc95baf ("dri: merge in loader_dri3", Mesa 24.3) it is compiled into
+ libdri and so into libgallium, which then links libxcb, xcb-dri3,
+ xcb-present, xcb-sync, xcb-xfixes and libxshmfence although libgallium never
+ calls it: all 54 of its xcb_*/xshmfence_* imports come from this one file.
+ NextBSD builds Mesa twice (nextbsd-mesa#10, E25 audit 4 option C): an
+ X-free core build (-Dplatforms= -Dglx=disabled) that ships libgallium, and
+ an X build whose GLX and x11 EGL vendor libraries are shipped against the
+ core build's libgallium. For that, the X build's frontends must not need
+ anything from libgallium that the core build lacks. Build the file as a
+ static library, as before 24.3, and link it into libGLX_mesa and
+ libEGL_mesa (x11 platform) instead:
+  - frontends/dri: loader_dri3_helper.c and its xcb/xshmfence dependencies
+    move from libdri to a new static libloader_dri3_helper. libdri keeps
+    only the xcb-dri3/xcb-present include flags (partial dependencies, no
+    link), for loader_dri_helper_screen.h. -DPUBLIC= keeps the helper's
+    functions hidden in libGLX_mesa, which has no version script;
+  - egl, glx: link libloader_dri3_helper where platform_x11_dri3.c and
+    dri3_glx.c are built;
+  - dri.sym.in: drop loader_dri3*, which no longer matches anything.
+ The source file isn't moved, so upstream changes to it still apply.
+ Everything the helper calls in libgallium is already in dri.sym.in.
+ Only meson and symbol-file lines change; build-mesa.sh checks that the X
+ frontends' undefined symbols are all exported by the core libgallium.
+ Not valid with zink: kopper.c (in libgallium) calls the helper. zink is off
+ (nextbsd-mesa#2), and build-mesa.sh fails if VK_USE_PLATFORM_XCB_KHR is
+ ever defined.
+Origin: NextBSD
+Forwarded: no
+---
+--- a/src/egl/meson.build
++++ b/src/egl/meson.build
+@@ -110,6 +110,7 @@ if with_dri
+     link_for_egl += libloader_x11
+     if with_dri_platform == 'drm' or with_dri_platform == 'pseudo-drm'
+       files_egl += files('drivers/dri2/platform_x11_dri3.c')
++      link_for_egl += libloader_dri3_helper
+     endif
+     deps_for_egl += [dep_x11_xcb, dep_xcb_xrandr, dep_xcb_xfixes, dep_xcb_shm]
+   endif
+--- a/src/gallium/frontends/dri/meson.build
++++ b/src/gallium/frontends/dri/meson.build
+@@ -19,12 +19,37 @@ files_libdri = files(
+   'dri_util.h',
+ )
+ 
++# NextBSD: loader_dri3_helper.c (the X11 DRI3/Present swap code) is built as
++# its own static library, linked into the X frontends (libGLX, libEGL with the
++# x11 platform) instead of into libgallium, so libgallium links no xcb or
++# xshmfence and one libgallium serves an X-free and an X build.
++libloader_dri3_helper = []
+ if with_platform_x11
+   deps_for_libdri += dep_xcb
+   if with_dri_platform == 'drm' or with_dri_platform == 'pseudo-drm'
+-    deps_for_libdri += [dep_xcb_dri3, dep_xcb_present, dep_xcb_sync,
+-                        dep_xshmfence, dep_xcb_xfixes]
+-    files_libdri += files('loader_dri3_helper.c')
++    # libdri still includes loader_dri_helper_screen.h's xcb headers.
++    deps_for_libdri += [
++      dep_xcb_dri3.partial_dependency(compile_args : true, includes : true),
++      dep_xcb_present.partial_dependency(compile_args : true, includes : true),
++    ]
++    libloader_dri3_helper = static_library(
++      'loader_dri3_helper',
++      files('loader_dri3_helper.c'),
++      include_directories : [
++        inc_include, inc_util, inc_mesa, inc_src, inc_gallium,
++        inc_gallium_aux, inc_gallium_drivers, inc_loader,
++      ],
++      # Its PUBLIC (libgallium's exports) would otherwise be exported by
++      # libGLX_mesa, which has no version script.
++      c_args : ['-DPUBLIC='],
++      gnu_symbol_visibility : 'hidden',
++      dependencies : [
++        dep_libdrm, idep_mesautil, dep_xcb, dep_xcb_dri3, dep_xcb_present,
++        dep_xcb_sync, dep_xshmfence, dep_xcb_xfixes,
++      ],
++      link_with : [libloader],
++      build_by_default : false,
++    )
+   endif
+ endif
+ 
+--- a/src/gallium/targets/dri/dri.sym.in
++++ b/src/gallium/targets/dri/dri.sym.in
+@@ -70,7 +70,6 @@
+ 		dri_get_pipe_screen;
+ 		dri_get_drm_device_info;
+ 		dri3*;
+-		loader_dri3*;
+ 		dri_create_drawable;
+ 		@nouveau_drm_screen_create@
+ 		@radeon_drm_winsys_create@
+--- a/src/glx/meson.build
++++ b/src/glx/meson.build
+@@ -65,6 +65,7 @@ if with_dri_platform == 'drm' or with_dri_platform == 'pseudo-drm'
+   endif
+ 
+   files_libglx += files('dri3_glx.c', 'dri3_priv.h')
++  extra_libs_libglx += libloader_dri3_helper
+ endif
+ 
+ if with_dri_platform == 'apple'
