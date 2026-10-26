@@ -78,7 +78,8 @@ and yaml). CI stages the sysroot and the LLVM first:
 | `SYSROOT` | the staged base with nextbsd-displayserver-support in `/usr` and nextbsd-xlibs in `/usr/X11`; scratch, since each component is installed into it |
 | `LLVM_STATIC` | the unpacked static LLVM; its `bin/llvm-config` is a build-host program that answers for the target |
 | `CROSS_BINDIR` | the toolchain's clang, lld and LLVM binutils (set by the container image) |
-| `DESTDIR` | where to stage the artifact; default `/stage` |
+| `DESTDIR` | where to stage the core artifact; default `/stage` |
+| `DESTDIR_X11` | where to stage the X artifact; default `/stage-x11` |
 | `INTEL_DRIVERS` | `on` (default), `auto` or `off`; see [Intel](#intel-iris-and-crocus) |
 
 For each component, in `COMPONENTS` order, it downloads and checks the
@@ -115,28 +116,52 @@ before this repo's first component is on its list.
 
 | Component | Version | Installs | Ticket |
 |---|---|---|---|
-| `libglvnd` | 1.7.0 | `libGL.so.1`, `libGLX.so.0`, `libOpenGL.so.0`, `libEGL.so.1`, `libGLESv1_CM.so.1`, `libGLESv2.so.2`, `libGLdispatch.so.0`; GL, GLES, EGL and KHR headers | nextbsd/nextbsd-mesa#1 |
-| `mesa` | 26.2.5 | `libGLX_mesa.so.0` (+ `libGLX_indirect.so.0` link), `libEGL_mesa.so.0` + `share/glvnd/egl_vendor.d/50_mesa.json`, `libgbm.so.1` + `lib/gbm/dri_gbm.so`, `libgallium-26.2.5.so`, `lib/dri/*_dri.so` (links to `libdril_dri.so`), `share/drirc.d` | nextbsd/nextbsd-mesa#1 |
+| `libglvnd` | 1.7.0 | core: `libOpenGL.so.0`, `libEGL.so.1`, `libGLESv1_CM.so.1`, `libGLESv2.so.2`, `libGLdispatch.so.0`; GL, GLES, EGL and KHR headers. X: `libGL.so.1`, `libGLX.so.0`, `GL/glx.h`, `GL/glxext.h`, `glvnd/libglxabi.h`, `gl.pc`, `glx.pc` | nextbsd/nextbsd-mesa#1, #10 |
+| `mesa` | 26.2.5 | core build: `libgallium-26.2.5.so`, `libEGL_mesa_core.so.0` + `share/glvnd/egl_vendor.d/50_mesa_core.json`, `libgbm.so.1` + `lib/gbm/dri_gbm.so`, `lib/dri/*_dri.so` (links to `libdril_dri.so`), `share/drirc.d`. X build: `libGLX_mesa.so.0` (+ `libGLX_indirect.so.0` link), `libEGL_mesa.so.0` + `share/glvnd/egl_vendor.d/50_mesa.json` | nextbsd/nextbsd-mesa#1, #10 |
 | `glu` | 9.0.3 | `libGLU.so.1`, `GL/glu.h` (E24: Gershwin's ItemFlow and Player, libs-quartzcore) | nextbsd/nextbsd-mesa#1 |
 
-Installed size (CI, with iris and crocus on amd64, nextbsd/nextbsd-mesa#6):
+Installed size (CI, with iris and crocus on amd64; nextbsd/nextbsd-mesa#6, #10):
 
-| Arch | `/usr/X11` from this repo | of which `libgallium-26.2.5.so` (LLVM inside) | artifact (`.tar.gz`) |
-|---|---|---|---|
-| amd64 | 96 MiB (iris and crocus: +12.3 MiB) | 89 MiB | 30 MiB |
-| arm64 | 77 MiB | 68 MiB | 23 MiB |
+| Arch | core `/usr/X11` | of which `libgallium-26.2.5.so` (LLVM inside) | core `.tar.gz` | X `/usr/X11` | X `.tar.gz` |
+|---|---|---|---|---|---|
+| amd64 | 94 MiB | 89 MiB | 30 MiB | 2.0 MiB | 0.5 MiB |
+| arm64 | 74 MiB | 68 MiB | 23 MiB | 2.6 MiB | 0.5 MiB |
+
+The two Mesa builds take a CI job about 20 minutes on amd64 (12 before the
+split) and 10 on arm64 (4).
 
 Licences are per component; see `NOTICE.md`. The top-level `LICENSE` (BSD-2)
 covers only this repo's harness. freeglut is not built: nothing calls GLUT.
 
-### Mesa configuration (E23 D5–D8, D15)
+### Mesa configuration (E23 D5–D8, D15; E25 D8)
+
+Mesa is built twice per arch from the same patched tree (nextbsd/nextbsd-mesa#10,
+[E25 audit 4](https://github.com/nextbsd/nextbsd-userland/wiki/E25-Audit-4-Mesa-Without-X)
+option C). Both builds share these options:
 
 ```
--Dplatforms=x11 -Dglx=dri -Degl=enabled -Dgbm=enabled -Dglvnd=enabled
+-Degl=enabled -Dgbm=enabled -Dglvnd=enabled -Dxlib-lease=disabled
 -Dllvm=enabled -Dshared-llvm=disabled -Damd-use-llvm=false -Dvulkan-drivers=
 -Dopengl=true -Dgles1=disabled -Dgles2=enabled
 -Ddri-drivers-path=/usr/X11/lib/dri -Dgbm-backends-path=/usr/X11/lib/gbm
 ```
+
+| Build | Own options | GLVND vendor | Kept |
+|---|---|---|---|
+| core | `-Dplatforms= -Dglx=disabled` | `mesa_core` | everything: libgallium, `libEGL_mesa_core.so.0` + `50_mesa_core.json`, libgbm, `dri_gbm.so`, `drirc.d`, `gbm.h`, `dri.pc`, `gbm.pc` |
+| X | `-Dplatforms=x11 -Dglx=dri -Dglx-direct=true` (as before the split) | `mesa` | for the X artifact, only `libGLX_mesa.so.0`, `libGLX_indirect.so.0`, `libEGL_mesa.so.0`, `50_mesa.json`; for the core artifact, `dri/libdril_dri.so` and the `dri/*_dri.so` links; its libgallium, libgbm, `dri_gbm.so` and the rest are discarded |
+
+libdril (the shim the X server's GLX and older loaders open as
+`dri/<driver>_dri.so`) comes from the X build because upstream builds it only
+with GLX or the x11 platform. It links only `libgbm.so.1` (no X library,
+checked), so it ships in the core artifact.
+
+The X frontends run against the core build's libgallium.
+`patches/mesa/0010` makes that possible: it builds `loader_dri3_helper.c`
+(the DRI3/Present swap code, the only source of libgallium's 54 xcb and
+xshmfence imports) into `libGLX_mesa` and `libEGL_mesa` instead of into
+libgallium, so the core libgallium links no X library and both builds'
+libgallium export the same symbols.
 
 | Arch | Gallium drivers | DRI names |
 |---|---|---|
@@ -147,28 +172,34 @@ covers only this repo's harness. freeglut is not built: nothing calls GLUT.
   ships, and `libgbm.so.1` (all NVIDIA uses) links neither LLVM nor
   `libgallium`. `patches/mesa/0002` stops meson demanding LLVM's `amdgpu`
   component when radeonsi uses ACO (D8).
-- **GLVND:** Mesa is a vendor (`mesa`). libglvnd looks for EGL vendor JSONs in
-  `/usr/X11/etc/glvnd/egl_vendor.d`, then `/usr/X11/share/glvnd/egl_vendor.d`
-  (Mesa's `50_mesa.json`). `libGLX_indirect.so.0` points at `libGLX_mesa.so.0`
+- **GLVND:** Mesa is two EGL vendors: `mesa_core` (core artifact) and `mesa`
+  (X artifact). libglvnd looks for EGL vendor JSONs in
+  `/usr/X11/etc/glvnd/egl_vendor.d`, then `/usr/X11/share/glvnd/egl_vendor.d`,
+  and reads each directory in `strcmp` order. With the core alone,
+  `50_mesa_core.json` is the only Mesa vendor (EGL on GBM, surfaceless,
+  device). With the X artifact too, `50_mesa.json` sorts first (`.` < `_`),
+  so the X vendor answers first, as before the split; both use the one
+  libgallium. NVIDIA's `10_nvidia.json` still sorts before both. `libGLX_indirect.so.0` points at `libGLX_mesa.so.0`
   for servers that name no vendor, as FreeBSD does with libmap.
 - **GBM backends** are looked up in `/usr/X11/lib/gbm`: Mesa's `dri_gbm.so`,
   and NVIDIA's `nvidia-drm_gbm.so` once `nvidia-activate.sh` links into
   `/usr/X11` instead of `/usr/local` (D15,
   nextbsd/nextbsd-kernel-extensions-nvidia#2). `GBM_BACKENDS_PATH` still
   overrides it.
-- **EGL platforms** (E25 D8): `-Dplatforms=x11` is the only platform
-  option. Mesa's meson adds **`surfaceless`** whenever EGL is built and
-  **`drm`** (EGL on GBM) whenever GBM is too, so `-Degl=enabled
-  -Dgbm=enabled` already give a display server without X what it needs:
+- **EGL platforms** (E25 D8, revised by audit 4): the core build has no
+  platform option at all. Mesa's meson adds **`surfaceless`** whenever EGL is
+  built and **`drm`** (EGL on GBM) whenever GBM is too, so
+  `libEGL_mesa_core.so.0` gives a display server without X what it needs:
   `EGL_KHR_platform_gbm` / `EGL_MESA_platform_gbm`,
-  `EGL_MESA_platform_surfaceless`, `EGL_EXT_platform_device` and GLES2. No
-  option changes for that. `build-mesa.sh` checks that the drm,
-  surfaceless, device and x11 EGL platforms are built, that
-  `libEGL_mesa.so.0` carries those extension strings and links `libgbm.so.1`,
-  and that libglvnd's `libEGL.so.1` (what an EGL-only client links) has no
-  `libX11` or `libxcb` in `DT_NEEDED`; it prints both libraries'
-  `DT_NEEDED`. `libEGL_mesa.so.0` links the X client libraries for the x11
-  platform but connects to no X server unless a client asks for it.
+  `EGL_MESA_platform_surfaceless`, `EGL_EXT_platform_device` and GLES2, and
+  links no X library. The X build's `libEGL_mesa.so.0` has those plus x11;
+  it links the X client libraries but connects to no X server unless a
+  client asks for it. `build-mesa.sh` checks the platforms each build
+  compiles (and that the core compiles no x11 platform and no DRI3 helper),
+  the extension strings in both vendor libraries, that both link
+  `libgbm.so.1`, and that libglvnd's `libEGL.so.1` (what an EGL-only client
+  links) has no `libX11` or `libxcb` in `DT_NEEDED`; it prints the
+  `DT_NEEDED` of each.
 - **Off:** Vulkan, lavapipe, zink (phase 2, nextbsd/nextbsd-mesa#2), Wayland,
   VA, rusticl, valgrind, libunwind, lm_sensors, zstd (base's is private),
   tools, tests and docs. meson finds displayserver-support's `libudev`, but
@@ -189,9 +220,10 @@ platforms). It then cross-builds Mesa with `-Dmesa-clc=system` and `iris,crocus`
 added to the drivers. The two tools and the host libraries are build input only.
 The build checks that:
 
-- iris and crocus are in the build, and the cross build runs the build-host
+- iris and crocus are in the build (both Mesa builds use the same driver
+  list; the checks run on the core build, whose libgallium ships), and the cross build runs the build-host
   `mesa_clc` instead of compiling its own;
-- nothing of that toolchain is staged: no `mesa_clc`, no `vtn_bindgen2`, no
+- nothing of that toolchain is staged in either artifact: no `mesa_clc`, no `vtn_bindgen2`, no
   libLLVM, libclang or SPIRV library, and no `/opt/mesa-clc` path in any file;
 - every `DT_NEEDED` of every installed library resolves to the base,
   nextbsd-displayserver-support, nextbsd-xlibs or this repo.
@@ -214,23 +246,48 @@ llvmpipe. `off` never builds them. arm64 builds neither. The Intel patches
 | `0006-intel-userptr-unsynchronized-fallback` | nextbsd-ports (FreeBSD) | drm-kmod's i915 has no MMU-notifier userptr |
 | `0007-intel-xe-clock-boottime-alias` | nextbsd-ports (FreeBSD) | `CLOCK_BOOTTIME == CLOCK_MONOTONIC` |
 | `0008-renderdoc-app-cc-freebsd` | nextbsd-ports (FreeBSD) | build fix |
-| `0009-gbm-dri-xcb-headers` | NextBSD | build fix: `dri_gbm.so` includes the loader's xcb headers when the X11 platform is built, but its meson target lists no xcb dependency; it built only while libdrm's `-I/usr/X11/include` happened to cover them. Adds the xcb, xcb-dri3 and xcb-present compile flags only, so it links no libxcb (E25) |
+| `0009-gbm-dri-xcb-headers` | NextBSD | build fix: `dri_gbm.so` includes the loader's xcb headers when the X11 platform is built, but its meson target lists no xcb dependency; it built only while libdrm's `-I/usr/X11/include` happened to cover them. Adds the xcb, xcb-dri3 and xcb-present compile flags only, so it links no libxcb (E25). Only the X build uses it now; its `dri_gbm.so` is discarded |
+| `0010-dri3-helper-out-of-libgallium` | NextBSD | E25 audit 4 option C (nextbsd/nextbsd-mesa#10): builds `loader_dri3_helper.c` as a static library linked into `libGLX_mesa` and `libEGL_mesa` instead of into libgallium (the layout before upstream `8cc95baf`, Mesa 24.3), and drops `loader_dri3*` from `dri.sym.in`. meson and symbol-file lines only; the source file isn't moved. Not valid with zink (`kopper.c` calls the helper from libgallium), which CI check 5 guards |
 
 Dropped: the POWER8 meson hunk and the llvmpipe altivec patch (PowerPC), the
 panfrost clock patch (panfrost isn't built), the Wayland WSI patch (no
 Wayland), and the `kwin_x11` driconf file.
 
-## CI, artifact, package
+## CI, artifacts, package
 
 The workflow builds both arches on every pull request. On a push to `main`, or
-a manual run from `main`, it also publishes `nextbsd-mesa-<arch>.tar.gz` to the
-`continuous` release, rooted at `/`.
+a manual run from `main`, it also publishes two artifacts per arch to the
+`continuous` release, both rooted at `/` and both under `/usr/X11`:
 
-The artifact holds the whole `/usr/X11` install of this repo: libraries,
-drivers, data, and the headers and `.pc` files that `nextbsd-xlibre` stages
-into its sysroot (glamor needs `gbm` and `egl`, GLX needs `dri.pc`). Splitting
-runtime from development files is `nextbsd-pkg`'s job (E23 D13,
-`NextBSD-mesa`).
+| Artifact | Holds | Needs at run time |
+|---|---|---|
+| `nextbsd-mesa-<arch>.tar.gz` (core) | libglvnd's EGL, GLES, OpenGL and dispatch libraries; Mesa's core build (libgallium, `libEGL_mesa_core`, libgbm, `dri_gbm.so`, libdril and the DRI links, `drirc.d`); libGLU; the GL (not GLX), EGL, GLES, KHR, gbm and glvnd headers; `egl`, `gbm`, `dri`, `glesv1_cm`, `glesv2`, `opengl`, `glu` and `libglvnd` `.pc` files | the base and nextbsd-displayserver-support only: no X library |
+| `nextbsd-mesa-x11-<arch>.tar.gz` (X) | `libGLX_mesa.so.0`, `libGLX_indirect.so.0`, `libEGL_mesa.so.0` + `50_mesa.json`; libglvnd's `libGL.so.1` and `libGLX.so.0`; `GL/glx.h`, `GL/glxext.h`, `glvnd/libglxabi.h`, `gl.pc`, `glx.pc` | the core artifact and nextbsd-xlibs |
+
+No path is in both. `nextbsd-xlibre` stages both into its sysroot (glamor
+needs `gbm` and `egl`, GLX needs `dri.pc` and `libGL`). Splitting runtime
+from development files is `nextbsd-pkg`'s job (E23 D13): the core becomes
+`NextBSD-mesa`, the X artifact `NextBSD-mesa-x11` (nextbsd/nextbsd-pkg#34).
+
+Besides the per-library checks, `build-mesa.sh` checks the split
+(E25 audit 4 §2 C):
+
+1. every `DT_NEEDED` of the core artifact resolves to the base,
+   nextbsd-displayserver-support or the core itself, without nextbsd-xlibs
+   (and the X artifact's resolves with xlibs and the core);
+2. libgallium, `libEGL_mesa_core`, `dri_gbm.so` and libdril have no
+   `libX11`, `libxcb` or `libxshmfence` in `DT_NEEDED`, and libgallium has no
+   undefined `xcb_*`, `xshmfence_*` or `loader_dri3_*` symbol;
+3. every undefined symbol of the X build's `libGLX_mesa` and `libEGL_mesa`
+   that libgallium provides is exported by the core libgallium, none is a
+   `loader_dri3_*` import, and all of them resolve in the frontends'
+   `DT_NEEDED` closure (with the core libgallium);
+4. the X build's discarded libgallium exports exactly the core's symbols;
+5. neither build defines `VK_USE_PLATFORM_XCB_KHR` (zink, nextbsd/nextbsd-mesa#2,
+   would change `struct dri_drawable` between the builds);
+
+plus the GLVND vendor layout (core: only `50_mesa_core.json`; X:
+`50_mesa.json`, which sorts first) and that no path is in both artifacts.
 
 Nothing is dispatched from here, and nothing dispatches here. `nextbsd-xlibre`
 and `nextbsd-pkg` are run by hand once this build is known good. There is no

@@ -15,6 +15,12 @@ The top-level **`LICENSE` (BSD 2-Clause)** covers only what this repo authors:
 `build-mesa.sh`, `sources.lock`, `cross/`, `.github/workflows/`, this
 `NOTICE.md` and `README.md`.
 
+Both published artifacts, `nextbsd-mesa-<arch>` (core) and
+`nextbsd-mesa-x11-<arch>` (X), are built from the sources below: libglvnd's
+libraries are split between them, and Mesa is built twice from the same
+patched tarball (README, "Mesa configuration"). The X artifact links no LLVM;
+the LLVM note below applies to the core's `libgallium-26.2.5.so`.
+
 | Component | Upstream | Version | Licence |
 |---|---|---|---|
 | `libglvnd` | freedesktop.org, `glvnd/libglvnd` | 1.7.0 | MIT-style (end of `README.md`; per-file headers). The Khronos headers it installs are Apache-2.0 / MIT (per header) |

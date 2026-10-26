@@ -7,9 +7,11 @@ name: Build NextBSD Mesa (libglvnd, Mesa, libGLU)
 # (libdrm, expat and the other shared display-server libraries in /usr), then
 # nextbsd-xlibs' `continuous` artifact (the X client libraries in /usr/X11);
 # LLVM is nextbsd-toolchain's static llvm-static-19.1.7 release. Same shape as nextbsd-xlibs (wiki:
-# Source-Repo-Conventions). Publishes nextbsd-mesa-<arch>.tar.gz to this
-# repo's `continuous` release on pushes to main and on manual runs from main;
-# pull requests build only.
+# Source-Repo-Conventions). Publishes two artifacts per arch to this repo's
+# `continuous` release on pushes to main and on manual runs from main (pull
+# requests build only): nextbsd-mesa-<arch>.tar.gz, the X-free core, and
+# nextbsd-mesa-x11-<arch>.tar.gz, Mesa's GLX and x11 EGL vendor plus
+# libglvnd's libGL/libGLX (nextbsd-mesa#10, E25 audit 4 option C).
 #
 # Nothing is dispatched from here and nothing dispatches here: nextbsd-xlibre
 # (which builds against this artifact) and nextbsd-pkg are run by hand, in
@@ -104,29 +106,44 @@ jobs:
           tar -C /opt -xJf "$f"
           cat "/opt/llvm-19-nextbsd-${{ matrix.arch }}/BUILD-INFO"
 
-      - name: Build Mesa into /stage
+      # Two Mesa builds (core without X, then X) sharing one libgallium;
+      # build-mesa.sh splits the result into /stage (core) and /stage-x11 (X)
+      # and runs the split checks (nextbsd-mesa#10).
+      - name: Build Mesa into /stage and /stage-x11
         env:
           T: ${{ matrix.arch }}
           TA: ${{ matrix.target_arch }}
           SYSROOT: ${{ github.workspace }}/sysroot
           LLVM_STATIC: /opt/llvm-19-nextbsd-${{ matrix.arch }}
           DESTDIR: /stage
+          DESTDIR_X11: /stage-x11
         run: ./build-mesa.sh
 
-      # Raw tar of /stage rooted at /: everything under /usr/X11, including
-      # the headers, .pc files and .so links that nextbsd-xlibre stages into
-      # its sysroot. Splitting runtime from development files is
+      # Raw tars rooted at /, everything under /usr/X11, including the
+      # headers, .pc files and .so links that nextbsd-xlibre stages into its
+      # sysroot (it needs both). No path is in both (checked by
+      # build-mesa.sh). Splitting runtime from development files is
       # nextbsd-pkg's job (E23 D13).
-      - name: Pack mesa artifact
+      - name: Pack mesa artifacts
         run: |
           tar -C /stage -czf "/tmp/nextbsd-mesa-${{ matrix.arch }}.tar.gz" .
-          tar -tzvf "/tmp/nextbsd-mesa-${{ matrix.arch }}.tar.gz" | grep -v '/$' || true
-          ls -l "/tmp/nextbsd-mesa-${{ matrix.arch }}.tar.gz"
+          tar -C /stage-x11 -czf "/tmp/nextbsd-mesa-x11-${{ matrix.arch }}.tar.gz" .
+          for a in mesa mesa-x11; do
+            f="/tmp/nextbsd-$a-${{ matrix.arch }}.tar.gz"
+            echo "== $f"
+            tar -tzvf "$f" | grep -v '/$' || true
+            ls -l "$f"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
           name: nextbsd-mesa-${{ matrix.arch }}
           path: /tmp/nextbsd-mesa-${{ matrix.arch }}.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nextbsd-mesa-x11-${{ matrix.arch }}
+          path: /tmp/nextbsd-mesa-x11-${{ matrix.arch }}.tar.gz
 
   publish:
     needs: build
@@ -142,8 +159,14 @@ jobs:
       - name: Gather artifacts
         run: |
           mkdir -p out
+          # nextbsd-mesa-<arch> and nextbsd-mesa-x11-<arch>, both arches.
           find artifacts -name 'nextbsd-mesa-*.tar.gz' -exec cp {} out/ \;
           ls -la out/
+          for a in amd64 arm64; do
+            for f in "nextbsd-mesa-$a.tar.gz" "nextbsd-mesa-x11-$a.tar.gz"; do
+              [ -f "out/$f" ] || { echo "missing $f" >&2; exit 1; }
+            done
+          done
       - name: Publish to continuous release
         uses: softprops/action-gh-release@v2
         with:
