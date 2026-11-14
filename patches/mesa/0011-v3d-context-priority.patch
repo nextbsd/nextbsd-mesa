@@ -1,0 +1,309 @@
+Description: v3d: GPU context priority (EGL_IMG_context_priority)
+ A compositor's composite jobs queue behind a GPU-bound client's render
+ jobs at the same priority, so on a Pi 500+ at 4K a full-screen shader
+ drags window dragging down with it (nextbsd/apps-windowserver#74). v3d
+ had no context priority: EGL_IMG_context_priority was not advertised and
+ a HIGH request came back MEDIUM.
+ .
+ NextBSD's v3d kernel driver now schedules each fd at LOW, MEDIUM or HIGH
+ (drm_sched run-queues), set with DRM_IOCTL_V3D_SET_PRIORITY and offered
+ through DRM_V3D_PARAM_ALLOWED_PRIORITIES, a mask the kernel computes for
+ the fd: HIGH only for root, DRM master, or an fd root opened. This patch
+ carries that UAPI block in include/drm-uapi/v3d_drm.h and:
+ .
+  - reports the kernel's mask as caps->context_priority_mask, so EGL
+    advertises EGL_IMG_context_priority, grants HIGH exactly when the
+    kernel would, and eglQueryContext reports what was granted. A kernel
+    without the extension fails the query; the mask stays 0 and nothing
+    changes.
+  - honours PIPE_CONTEXT_{LOW,HIGH,REALTIME}_PRIORITY in
+    v3d_context_create. The kernel schedules by fd and all of a screen's
+    contexts share screen->fd, so the screen counts live contexts per
+    level and keeps the fd at the highest level any of them wants (MEDIUM
+    with none): no context runs below what it asked for. The priority is
+    set before the new context submits anything.
+Origin: NextBSD (nextbsd/apps-windowserver#74, nextbsd/nextbsd#642 E38)
+Forwarded: no (the kernel half is NextBSD-only UAPI,
+ nextbsd/nextbsd-kernel-extensions-graphics)
+---
+--- a/include/drm-uapi/v3d_drm.h
++++ b/include/drm-uapi/v3d_drm.h
+@@ -65,6 +65,19 @@ extern "C" {
+ #define DRM_IOCTL_V3D_PERFMON_SET_GLOBAL  DRM_IOW(DRM_COMMAND_BASE + DRM_V3D_PERFMON_SET_GLOBAL, \
+ 						   struct drm_v3d_perfmon_set_global)
+ 
++/*
++ * NextBSD extension (nextbsd/apps-windowserver#74): GPU scheduling priority.
++ *
++ * Not upstream; must match nextbsd-kernel-extensions-graphics'
++ * graphics/include/uapi/drm/v3d_drm.h. The numbers sit well above upstream's
++ * (ioctl 0x40, GET_PARAM 0x100) so a later upstream addition can't alias
++ * them.
++ */
++#define DRM_V3D_SET_PRIORITY                      0x40
++
++#define DRM_IOCTL_V3D_SET_PRIORITY        DRM_IOW(DRM_COMMAND_BASE + DRM_V3D_SET_PRIORITY, \
++						   struct drm_v3d_set_priority)
++
+ #define DRM_V3D_SUBMIT_CL_FLUSH_CACHE             0x01
+ #define DRM_V3D_SUBMIT_EXTENSION		  0x02
+ 
+@@ -298,6 +311,13 @@ enum drm_v3d_param {
+         DRM_V3D_PARAM_CONTEXT_RESET_COUNTER,
+ };
+ 
++/*
++ * NextBSD extension: the priorities this fd may set with
++ * DRM_IOCTL_V3D_SET_PRIORITY, as a mask of (1 << enum drm_v3d_priority).
++ * A kernel without the extension fails the query with EINVAL.
++ */
++#define DRM_V3D_PARAM_ALLOWED_PRIORITIES          0x100
++
+ struct drm_v3d_get_param {
+ 	__u32 param;
+ 	__u32 pad;
+@@ -786,6 +806,32 @@ struct drm_v3d_perfmon_set_global {
+ 	__u32 id;
+ };
+ 
++/*
++ * NextBSD extension: scheduling priorities, in the bit order of
++ * DRM_V3D_PARAM_ALLOWED_PRIORITIES, PIPE_CONTEXT_PRIORITY_* and
++ * EGL_IMG_context_priority (LOW, MEDIUM, HIGH).
++ */
++enum drm_v3d_priority {
++	DRM_V3D_PRIORITY_LOW = 0,
++	DRM_V3D_PRIORITY_MEDIUM = 1,	/* the default */
++	DRM_V3D_PRIORITY_HIGH = 2,
++};
++
++/**
++ * struct drm_v3d_set_priority - NextBSD: set this fd's GPU priority
++ *
++ * Every job submitted on the fd from then on, on every queue, is scheduled
++ * at @priority (no preemption). The priority belongs to the fd, so every
++ * context sharing it shares it. HIGH needs CAP_SYS_NICE (root), DRM master,
++ * or an fd opened by a process that had CAP_SYS_NICE; otherwise EACCES.
++ */
++struct drm_v3d_set_priority {
++	/** enum drm_v3d_priority */
++	__u32 priority;
++	/** Must be zero. */
++	__u32 pad;
++};
++
+ #if defined(__cplusplus)
+ }
+ #endif
+--- a/src/gallium/drivers/v3d/v3d_context.c
++++ b/src/gallium/drivers/v3d/v3d_context.c
+@@ -355,6 +355,9 @@ v3d_context_destroy(struct pipe_context *pctx)
+ 
+         v3d_fence_context_finish(v3d);
+ 
++        if (v3d->priority_counted)
++                v3d_screen_priority_ref(v3d->screen, v3d->priority, -1);
++
+         ralloc_free(v3d);
+ }
+ 
+@@ -474,6 +477,11 @@ v3d_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
+         slab_create_child(&v3d->transfer_pool, &screen->transfer_pool);
+ 
+         v3d->robust_buffer = flags & PIPE_CONTEXT_ROBUST_BUFFER_ACCESS;
++
++        /* Before this context submits anything. */
++        v3d->priority = v3d_screen_priority_for_flags(screen, flags);
++        v3d_screen_priority_ref(screen, v3d->priority, 1);
++        v3d->priority_counted = true;
+         if (screen->devinfo.has_reset_counter) {
+                 pctx->get_device_reset_status = v3d_get_device_reset_status;
+                 v3d->global_reset_count = v3d_get_reset_count(v3d, false);
+--- a/src/gallium/drivers/v3d/v3d_context.h
++++ b/src/gallium/drivers/v3d/v3d_context.h
+@@ -686,6 +686,12 @@ struct v3d_context {
+          */
+         bool robust_buffer;
+ 
++        /* NextBSD: DRM_V3D_PRIORITY_* this context asked for, and whether it
++         * is counted in screen->priority_contexts (v3d_screen_priority_ref).
++         */
++        uint32_t priority;
++        bool priority_counted;
++
+         /* How many GPU resets happened since the driver was proved, and how
+          * many were caused by this context.
+          */
+--- a/src/gallium/drivers/v3d/v3d_screen.c
++++ b/src/gallium/drivers/v3d/v3d_screen.c
+@@ -24,6 +24,7 @@
+ 
+ #include "common/v3d_device_info.h"
+ #include "common/v3d_limits.h"
++#include "util/log.h"
+ #include "util/os_misc.h"
+ #include "pipe/p_defines.h"
+ #include "pipe/p_screen.h"
+@@ -39,6 +40,8 @@
+ #include "util/ralloc.h"
+ #include "util/xmlconfig.h"
+ 
++#include <errno.h>
++#include <string.h>
+ #include <xf86drm.h>
+ #include "v3d_screen.h"
+ #include "v3d_context.h"
+@@ -96,6 +99,7 @@ v3d_screen_destroy(struct pipe_screen *pscreen)
+ 
+         u_transfer_helper_destroy(pscreen->transfer_helper);
+ 
++        mtx_destroy(&screen->priority_lock);
+         close(screen->fd);
+         ralloc_free(pscreen);
+ }
+@@ -114,6 +118,88 @@ v3d_has_feature(struct v3d_screen *screen, enum drm_v3d_param feature)
+         return p.value;
+ }
+ 
++/*
++ * NextBSD (apps-windowserver#74): the GPU priorities this fd may use, as
++ * PIPE_CONTEXT_PRIORITY_* bits, which EGL turns into EGL_IMG_context_priority.
++ * The kernel answers for this fd, so HIGH is only offered when it would be
++ * granted, and eglQueryContext reports the truth. 0 on a kernel without the
++ * extension: no EGL_IMG_context_priority, as before.
++ */
++static uint32_t
++v3d_priority_mask(struct v3d_screen *screen)
++{
++#if USE_V3D_SIMULATOR
++        return 0;
++#else
++        struct drm_v3d_get_param p = {
++                .param = DRM_V3D_PARAM_ALLOWED_PRIORITIES,
++        };
++
++        if (v3d_ioctl(screen->fd, DRM_IOCTL_V3D_GET_PARAM, &p) != 0)
++                return 0;
++
++        STATIC_ASSERT(PIPE_CONTEXT_PRIORITY_LOW == 1 << DRM_V3D_PRIORITY_LOW);
++        STATIC_ASSERT(PIPE_CONTEXT_PRIORITY_MEDIUM == 1 << DRM_V3D_PRIORITY_MEDIUM);
++        STATIC_ASSERT(PIPE_CONTEXT_PRIORITY_HIGH == 1 << DRM_V3D_PRIORITY_HIGH);
++        return p.value & (PIPE_CONTEXT_PRIORITY_LOW |
++                          PIPE_CONTEXT_PRIORITY_MEDIUM |
++                          PIPE_CONTEXT_PRIORITY_HIGH);
++#endif
++}
++
++/* The DRM_V3D_PRIORITY_* a context created with @flags runs at. */
++uint32_t
++v3d_screen_priority_for_flags(struct v3d_screen *screen, unsigned flags)
++{
++        uint32_t want = DRM_V3D_PRIORITY_MEDIUM;
++
++        if (flags & (PIPE_CONTEXT_HIGH_PRIORITY | PIPE_CONTEXT_REALTIME_PRIORITY))
++                want = DRM_V3D_PRIORITY_HIGH;
++        else if (flags & PIPE_CONTEXT_LOW_PRIORITY)
++                want = DRM_V3D_PRIORITY_LOW;
++
++        /* EGL only asks for what the mask offers; be safe for other callers. */
++        if (!(screen->priority_mask & (1u << want)))
++                want = DRM_V3D_PRIORITY_MEDIUM;
++        return want;
++}
++
++/*
++ * A context at @priority comes (delta 1) or goes (delta -1): set the fd to
++ * the highest priority a live context wants, MEDIUM when there are none.
++ * Raising it for a new HIGH context means every context on the screen runs
++ * at HIGH while that one lives; none ever runs below what it asked for.
++ */
++void
++v3d_screen_priority_ref(struct v3d_screen *screen, uint32_t priority,
++                        int delta)
++{
++        uint32_t want = DRM_V3D_PRIORITY_MEDIUM;
++
++        if (screen->priority_mask == 0)
++                return;
++
++        mtx_lock(&screen->priority_lock);
++        screen->priority_contexts[priority] += delta;
++        for (int p = DRM_V3D_PRIORITY_HIGH; p >= DRM_V3D_PRIORITY_LOW; p--) {
++                if (screen->priority_contexts[p] != 0) {
++                        want = p;
++                        break;
++                }
++        }
++        if (want != screen->priority) {
++                struct drm_v3d_set_priority args = { .priority = want };
++
++                if (v3d_ioctl(screen->fd, DRM_IOCTL_V3D_SET_PRIORITY,
++                              &args) == 0)
++                        screen->priority = want;
++                else
++                        mesa_logw("v3d: setting GPU priority %u failed: %s",
++                                  want, strerror(errno));
++        }
++        mtx_unlock(&screen->priority_lock);
++}
++
+ static void
+ v3d_init_shader_caps(struct v3d_screen *screen)
+ {
+@@ -296,6 +382,7 @@ v3d_init_screen_caps(struct v3d_screen *screen)
+         caps->texture_barrier = false;
+         caps->polygon_offset_clamp = true;
+         caps->texture_query_lod = true;
++        caps->context_priority_mask = screen->priority_mask;
+ 
+         caps->query_timestamp =
+         caps->query_time_elapsed = screen->has_cpu_queue && screen->has_multisync;
+@@ -858,6 +945,10 @@ v3d_screen_create(int fd, const struct pipe_screen_config *config,
+         screen->has_cpu_queue = v3d_has_feature(screen, DRM_V3D_PARAM_SUPPORTS_CPU_QUEUE);
+         screen->has_multisync = v3d_has_feature(screen, DRM_V3D_PARAM_SUPPORTS_MULTISYNC_EXT);
+ 
++        (void)mtx_init(&screen->priority_lock, mtx_plain);
++        screen->priority = DRM_V3D_PRIORITY_MEDIUM;
++        screen->priority_mask = v3d_priority_mask(screen);
++
+         v3d_fence_screen_init(screen);
+ 
+         v3d_process_debug_variable();
+--- a/src/gallium/drivers/v3d/v3d_screen.h
++++ b/src/gallium/drivers/v3d/v3d_screen.h
+@@ -89,6 +89,21 @@ struct v3d_screen {
+         bool has_cpu_queue;
+         bool has_multisync;
+ 
++        /*
++         * NextBSD (apps-windowserver#74): GPU priority. The kernel schedules
++         * by fd, and every context on this screen shares screen->fd, so the
++         * fd runs at the highest priority any live context asked for.
++         *
++         * priority_mask: what the kernel lets this fd set, as
++         * PIPE_CONTEXT_PRIORITY_* bits (0: no kernel support).
++         * priority_contexts: live contexts at each DRM_V3D_PRIORITY_*.
++         * priority: what the fd is set to now.
++         */
++        uint32_t priority_mask;
++        uint32_t priority_contexts[3];
++        uint32_t priority;
++        mtx_t priority_lock;
++
+         float heap_memory_percent;
+ 
+ #if USE_V3D_SIMULATOR
+@@ -115,6 +130,13 @@ const char *v3d_screen_get_name(struct pipe_screen *pscreen);
+ void
+ v3d_fence_screen_init(struct v3d_screen *screen);
+ 
++uint32_t
++v3d_screen_priority_for_flags(struct v3d_screen *screen, unsigned flags);
++
++void
++v3d_screen_priority_ref(struct v3d_screen *screen, uint32_t priority,
++                        int delta);
++
+ #ifdef ENABLE_SHADER_CACHE
+ void
+ v3d_disk_cache_init(struct v3d_screen *screen);

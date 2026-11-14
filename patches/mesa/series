@@ -21,6 +21,9 @@
 # libgallium, so one X-free libgallium serves the core and the X build
 # (nextbsd-mesa#10, E25 audit 4 option C).
 0010-dri3-helper-out-of-libgallium.patch
+# NextBSD's own: v3d GPU context priority (EGL_IMG_context_priority) on the
+# v3d kernel driver's per-fd priority UAPI (nextbsd/apps-windowserver#74).
+0011-v3d-context-priority.patch
 #
 # Not carried from nextbsd-ports graphics/mesa-dri/files (E23 D11):
 #   patch-meson.build's POWER8 hunk, patch-src_gallium_drivers_llvmpipe_lp__rast__tri.c
